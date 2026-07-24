@@ -1,0 +1,24 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <title>Saksham Valuer Portal - Login</title>
+    <style>
+        body { font-family: sans-serif; background: #0f172a; color: white; display:flex; justify-content:center; align-items:center; height:100vh; margin:0; }
+        .card { background: #1e293b; padding: 40px; border-radius: 12px; border: 1px solid #334155; width: 340px; text-align: center; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.5); }
+        input { width: 100%; padding: 12px; margin: 10px 0; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: white; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; background: #38bdf8; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; color: #0f172a; font-size:15px; }
+        button:hover { background: #0ea5e9; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2 style="color:#38bdf8; margin-top:0;">SAKSHAM PORTAL</h2>
+        <p style="font-size:13px; color:#94a3b8;">Property Valuation Management System</p>
+        <form action="/auth/login" method="POST">
+            <input type="text" placeholder="Valuer ID / Email" value="VALUER_01" required>
+            <input type="password" placeholder="Password" value="123456" required>
+            <button type="submit">🔑 LOGIN TO DASHBOARD</button>
+        </form>
+    </div>
+</body>
+</html>
