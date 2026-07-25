@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>Bank Excel Templates</h1>
+  <p>Upload the original bank .xlsx template after placing SVAI tokens in the required cells.</p>
+  <form method="post" enctype="multipart/form-data" class="form-grid three">
+    <label>Bank Name<input name="bank_name" required></label>
+    <label>Excel Template<input type="file" name="template" accept=".xlsx,.xlsm" required></label>
+    <button>Upload Template</button>
+  </form>
+  <details>
+    <summary>Available Excel tokens</summary>
+    <div class="token-list">
+      {{ "{{APPLICATION_NUMBER}}" }}, {{ "{{CUSTOMER_NAME}}" }}, {{ "{{CONTACT_NUMBER}}" }},
+      {{ "{{PROPERTY_ADDRESS}}" }}, {{ "{{BANK_NAME}}" }}, {{ "{{BRANCH_NAME}}" }},
+      {{ "{{CASE_TYPE}}" }}, {{ "{{REPORT_DATE}}" }}, {{ "{{LAND_AREA}}" }},
+      {{ "{{LAND_RATE}}" }}, {{ "{{LAND_VALUE}}" }}, {{ "{{BUILTUP_AREA}}" }},
+      {{ "{{CONSTRUCTION_RATE}}" }}, {{ "{{MARKET_VALUE}}" }},
+      {{ "{{CONSERVATIVE_VALUE}}" }}, {{ "{{DISTRESS_VALUE}}" }},
+      {{ "{{GOVT_VALUE}}" }}, {{ "{{REMARKS}}" }}
+    </div>
+  </details>
+</section>
+<section class="card">
+  <h2>Uploaded Templates</h2>
+  <div class="table-wrap"><table><thead><tr><th>Bank</th><th>Filename</th><th>Uploaded</th><th></th></tr></thead>
+  <tbody>{% for t in templates %}<tr><td>{{ t.category }}</td><td>{{ t.filename }}</td><td>{{ t.created_at }}</td>
+  <td><form method="post" action="{{ url_for('delete_template', asset_id=t.id) }}"><button class="small danger" data-confirm="Delete this template?">Delete</button></form></td></tr>
+  {% else %}<tr><td colspan="4" class="empty">No templates uploaded.</td></tr>{% endfor %}</tbody></table></div>
+</section>
+{% endblock %}

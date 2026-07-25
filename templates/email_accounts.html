@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>Bank Email Integration</h1>
+  <p>Use an app password, not your normal email password. Only unread emails that appear to be genuine property valuation cases are added to MIS.</p>
+  <form method="post" class="form-grid three">
+    <label>Email<input type="email" name="email" required></label>
+    <label>App Password<input type="password" name="password" required></label>
+    <label>Provider<select name="provider"><option value="auto">Auto Detect</option><option>Gmail</option><option>Yahoo</option><option>Outlook</option></select></label>
+    <label>Bank Name<input name="bank_name" placeholder="Optional label"></label>
+    <label>Custom IMAP Host<input name="imap_host" placeholder="Optional, e.g. imap.domain.com"></label>
+    <button>Verify & Link Email</button>
+  </form>
+</section>
+<section class="card">
+  <div class="section-head"><h2>Linked Accounts</h2><form method="post" action="{{ url_for('fetch_all_emails') }}"><button class="green">Fetch All Now</button></form></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Email</th><th>Provider</th><th>Bank</th><th>Last Fetch</th><th>Actions</th></tr></thead>
+    <tbody>{% for a in accounts %}
+      <tr><td>{{ a.email }}</td><td>{{ a.provider }}</td><td>{{ a.bank_name }}</td><td>{{ a.last_fetch_at or 'Never' }}</td>
+      <td class="actions">
+        <form method="post" action="{{ url_for('fetch_one_email', account_id=a.id) }}"><button class="small green">Fetch</button></form>
+        <form method="post" action="{{ url_for('delete_email_account', account_id=a.id) }}"><button class="small danger" data-confirm="Remove linked email?">Remove</button></form>
+      </td></tr>
+    {% else %}<tr><td colspan="5" class="empty">No email linked.</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}

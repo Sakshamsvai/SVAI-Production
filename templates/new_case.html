@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow">
+  <h1>Create Manual Valuation Case</h1>
+  <form method="post" class="form-grid two">
+    <label>Application Number<input name="application_number"></label>
+    <label>Customer Name<input name="customer_name" required></label>
+    <label>Contact Number<input name="contact_number"></label>
+    <label>Bank Name<input name="bank_name"></label>
+    <label>Branch Name<input name="branch_name"></label>
+    <label>Case Type<select name="case_type"><option>LAP</option><option>Home Loan</option><option>Construction Stage</option><option>Other</option></select></label>
+    <label>Visit By<input name="visit_by"></label>
+    <label class="full">Property Address<textarea name="property_address" rows="4"></textarea></label>
+    <button class="full">Create & Open Case</button>
+  </form>
+</section>
+{% endblock %}
