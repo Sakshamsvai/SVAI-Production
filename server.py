@@ -284,9 +284,21 @@ def send_password_reset_code(account, recipient, code):
         "this email."
     )
     host = detect_smtp(account.email, account.provider)
-    with smtplib.SMTP_SSL(host, 465, timeout=20) as smtp:
-        smtp.login(account.email, decrypt_password(account.encrypted_password))
-        smtp.send_message(message)
+    password = decrypt_password(account.encrypted_password)
+    try:
+        with smtplib.SMTP_SSL(host, 465, timeout=12) as smtp:
+            smtp.login(account.email, password)
+            smtp.send_message(message)
+            return
+    except (OSError, smtplib.SMTPException):
+        # Some cloud hosts block outbound SMTPS/465 while allowing the
+        # standard STARTTLS submission port. Gmail and Yahoo support both.
+        with smtplib.SMTP(host, 587, timeout=20) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(account.email, password)
+            smtp.send_message(message)
 
 
 def decode_header_value(value: str) -> str:
