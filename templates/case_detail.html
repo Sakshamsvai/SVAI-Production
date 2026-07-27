@@ -161,6 +161,11 @@
         <label>Visit Date<input name="visit_date" value="{{ profile.get('visit_date', '') }}"></label>
         <label>Structure Type<input name="structure_type" value="{{ profile.get('structure_type', '') }}"></label>
         <label>Construction Quality<input name="construction_quality" value="{{ profile.get('construction_quality', '') }}"></label>
+        <label>Construction Stage<select name="construction_stage">
+          <option value="">Photo/Visit Form se select karein</option>
+          {% for stage in ["Completed / Plastered","Without Plaster / Brickwork","Plinth / Foundation"] %}
+          <option {% if profile.get('construction_stage')==stage %}selected{% endif %}>{{ stage }}</option>{% endfor %}
+        </select></label>
         <label>Construction Year<input name="construction_year" value="{{ profile.get('construction_year', '') }}"></label>
         <label>Property Age<input name="property_age_years" value="{{ profile.get('property_age_years', '') }}"></label>
         <label>Residual Age<input name="residual_age_years" value="{{ profile.get('residual_age_years', '') }}"></label>
@@ -188,8 +193,8 @@
     <label>Depreciation %<input type="number" step="any" name="depreciation_percent" value="{{ v.depreciation_percent if v else 0 }}"></label>
     <label>Govt. Land Rate<input type="number" step="any" name="govt_land_rate" value="{{ v.govt_land_rate if v else 0 }}"></label>
     <label>Govt. Construction Rate<input type="number" step="any" name="govt_construction_rate" value="{{ v.govt_construction_rate if v else 0 }}"></label>
-    <label>Conservative %<input type="number" step="any" name="conservative_percent" value="{{ v.conservative_percent if v else 80 }}"></label>
-    <label>Distress / QSV %<input type="number" step="any" name="distress_percent" value="{{ v.distress_percent if v else 70 }}"></label>
+    <label>Conservative %<input type="number" step="any" name="conservative_percent" value="{{ v.conservative_percent if v else 100 }}"></label>
+    <label>Distress / QSV %<input type="number" step="any" name="distress_percent" value="{{ v.distress_percent if v else 80 }}"></label>
     <label class="full">Remarks<textarea name="remarks" rows="3">{{ v.remarks if v else '' }}</textarea></label>
     <button class="full green">Calculate & Save Valuation</button>
   </form>

@@ -37,7 +37,7 @@ from report_service import fill_docx_template, fill_excel_template  # noqa: E402
 from server import (  # noqa: E402
     EmailAccount, FileAsset, User, ValuationCase, app, apply_email_details,
     apply_followup_to_existing_case, db, encrypt_password, is_followup_email,
-    normalized_application_number, safe_json,
+    normalized_application_number, safe_json, valuation_defaults_from_profile,
 )
 
 
@@ -796,6 +796,46 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(len(ummeed.tables), 6)
         self.assertIn("MAP-001", ummeed.tables[0].rows[1].cells[-1].text)
         self.assertEqual(len(ummeed.inline_shapes), 1)
+
+    def test_valuer_standing_defaults_use_document_and_site_authority(self):
+        defaults = valuation_defaults_from_profile({
+            "land_area_as_per_docs": "1,250 sq ft",
+            "land_area_as_per_site": "1,180 sq ft",
+            "builtup_area_as_per_site": "780 sq ft",
+            "govt_land_rate": "250",
+            "construction_stage": "Without Plaster / Brickwork",
+            "construction_year": "2020",
+        })
+        self.assertEqual(defaults["land_area"], 1250)
+        self.assertEqual(defaults["builtup_area"], 780)
+        self.assertEqual(defaults["land_rate"], 500)
+        self.assertEqual(defaults["construction_rate"], 700)
+        self.assertEqual(defaults["age_years"], 6)
+        self.assertEqual(defaults["depreciation_percent"], 0)
+        self.assertEqual(defaults["conservative_percent"], 70)
+        self.assertEqual(defaults["distress_percent"], 80)
+
+    def test_laxmi_generic_whatsapp_photos_fill_available_slots(self):
+        root = Path(__file__).resolve().parents[1]
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (160, 100), "#d9e8f5").save(image_buffer, format="JPEG")
+        photos = [
+            {
+                "filename": f"WhatsApp_Image_{index}.jpeg",
+                "category": "Other Site Photo",
+                "content": image_buffer.getvalue(),
+            }
+            for index in range(6)
+        ]
+        output = fill_excel_template(
+            (root / "seed_templates" / "Laxmi India.xlsx").read_bytes(),
+            {"application_number": "PHOTO-001"},
+            photos,
+            "Laxmi India.xlsx",
+            "Laxmi India Finance",
+        )
+        sheet = load_workbook(io.BytesIO(output), data_only=False)["MOTA RAM"]
+        self.assertEqual(len(sheet._images), 6)
 
     @classmethod
     def tearDownClass(cls):

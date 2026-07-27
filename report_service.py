@@ -645,6 +645,19 @@ def insert_excel_photos(workbook, photo_assets, template_name="", bank_name=""):
                 ),
                 None,
             )
+            if asset is None and requested not in ("Property Document", "Site Sketch", "Location Map"):
+                asset = next(
+                    (
+                        candidate for candidate in photos
+                        if (
+                            id(candidate) not in used
+                            and (candidate.get("category") or "") not in {
+                                "Property Document", "Site Sketch", "Location Map",
+                            }
+                        )
+                    ),
+                    None,
+                )
             if asset is None:
                 continue
             used.add(id(asset))

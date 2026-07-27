@@ -169,8 +169,8 @@ class Valuation(db.Model):
     depreciation_percent = db.Column(db.Float, default=0)
     govt_land_rate = db.Column(db.Float, default=0)
     govt_construction_rate = db.Column(db.Float, default=0)
-    conservative_percent = db.Column(db.Float, default=80)
-    distress_percent = db.Column(db.Float, default=70)
+    conservative_percent = db.Column(db.Float, default=100)
+    distress_percent = db.Column(db.Float, default=80)
     land_value = db.Column(db.Float, default=0)
     gross_building_value = db.Column(db.Float, default=0)
     depreciation_amount = db.Column(db.Float, default=0)
@@ -919,8 +919,8 @@ def valuation_calculation(form):
         "depreciation_percent": f("depreciation_percent"),
         "govt_land_rate": f("govt_land_rate"),
         "govt_construction_rate": f("govt_construction_rate"),
-        "conservative_percent": f("conservative_percent", 80),
-        "distress_percent": f("distress_percent", 70),
+        "conservative_percent": f("conservative_percent", 100),
+        "distress_percent": f("distress_percent", 80),
         "remarks": form.get("remarks", ""),
     }
     data["land_value"] = data["land_area"] * data["land_rate"]
@@ -947,6 +947,59 @@ def numeric_from_value(value, default=0):
         return float(match.group(0).replace(",", ""))
     except ValueError:
         return float(default)
+
+
+def valuation_defaults_from_profile(profile):
+    """Apply the valuer's standing rules without inventing source facts."""
+    profile = profile or {}
+    stage_text = " ".join(str(profile.get(key) or "") for key in (
+        "construction_stage", "construction_quality", "structure_type", "remarks",
+    )).casefold()
+    if any(token in stage_text for token in ("plinth", "foundation", "dpc")):
+        construction_rate, conservative_percent = 300.0, 30.0
+    elif any(token in stage_text for token in (
+        "without plaster", "unplastered", "brick work", "brickwork", "bare brick",
+    )):
+        construction_rate, conservative_percent = 700.0, 70.0
+    elif any(token in stage_text for token in (
+        "complete", "completed", "plaster", "finished", "ready",
+    )):
+        construction_rate, conservative_percent = 1000.0, 100.0
+    else:
+        construction_rate, conservative_percent = 0.0, 100.0
+
+    age_years = numeric_from_value(profile.get("property_age_years"))
+    if not age_years:
+        construction_year = numeric_from_value(profile.get("construction_year"))
+        current_year = datetime.now(APP_TIMEZONE).year
+        if 1900 <= construction_year <= current_year:
+            age_years = float(current_year - int(construction_year))
+    if age_years:
+        profile["property_age_years"] = age_years
+        profile["residual_age_years"] = max(0.0, 60.0 - age_years)
+
+    govt_land_rate = numeric_from_value(profile.get("govt_land_rate"))
+    market_land_rate = numeric_from_value(profile.get("land_rate"))
+    if not market_land_rate and govt_land_rate:
+        market_land_rate = govt_land_rate * 2
+
+    return {
+        "land_area": numeric_from_value(profile.get("land_area_as_per_docs")),
+        "land_rate": market_land_rate,
+        "builtup_area": numeric_from_value(profile.get("builtup_area_as_per_site")),
+        "construction_rate": (
+            numeric_from_value(profile.get("construction_rate"))
+            or construction_rate
+        ),
+        "age_years": age_years,
+        "depreciation_percent": 0.0,
+        "govt_land_rate": govt_land_rate,
+        "govt_construction_rate": numeric_from_value(
+            profile.get("govt_construction_rate")
+        ),
+        "conservative_percent": conservative_percent,
+        "distress_percent": 80.0,
+    }
 
 
 def report_mapping(case: ValuationCase, valuation: Valuation):
@@ -1759,23 +1812,20 @@ def process_case_ai(case_id):
         {"email": email_data, "case_profile": case_profile}, ensure_ascii=False, default=str
     )
     valuation = valuation or Valuation(case_id=case_id)
-    draft_sources = {
-        "land_area": (
-            case_profile.get("land_area_as_per_site")
-            or case_profile.get("land_area_as_per_docs")
-        ),
-        "land_rate": case_profile.get("land_rate"),
-        "builtup_area": (
-            case_profile.get("builtup_area_as_per_site")
-            or case_profile.get("builtup_area_as_per_docs")
-        ),
-        "construction_rate": case_profile.get("construction_rate"),
-        "age_years": case_profile.get("property_age_years"),
-        "govt_land_rate": case_profile.get("govt_land_rate"),
-        "govt_construction_rate": case_profile.get("govt_construction_rate"),
-    }
+    draft_sources = valuation_defaults_from_profile(case_profile)
     for field, source_value in draft_sources.items():
-        if not getattr(valuation, field, 0) and source_value not in ("", None):
+        current_value = getattr(valuation, field, 0)
+        standing_rule_field = field in {
+            "depreciation_percent", "conservative_percent", "distress_percent",
+        }
+        old_generic_default = (
+            (field == "conservative_percent" and current_value == 80)
+            or (field == "distress_percent" and current_value == 70)
+        )
+        if (
+            source_value not in ("", None)
+            and (not current_value or standing_rule_field or old_generic_default)
+        ):
             setattr(valuation, field, numeric_from_value(source_value))
     recalculated = valuation_calculation({
         "land_area": valuation.land_area,
@@ -1861,6 +1911,7 @@ SOURCE_REVIEW_FIELDS = (
     "visit_date",
     "structure_type",
     "construction_quality",
+    "construction_stage",
     "construction_year",
     "property_age_years",
     "residual_age_years",
@@ -2008,6 +2059,27 @@ def generate_report(case_id):
         }
         for asset in assets if asset.asset_type == "photo"
     ]
+    visit_images = [
+        asset for asset in assets
+        if (
+            asset.asset_type == "visit_data"
+            and Path(asset.filename).suffix.lower() in PHOTO_EXTENSIONS
+            and (asset.category or "").startswith("Visit Form Page ")
+        )
+    ]
+    visit_images.sort(
+        key=lambda asset: numeric_from_value(asset.category or "", asset.id)
+    )
+    if len(visit_images) >= 4:
+        for asset, category in (
+            (visit_images[-2], "Site Sketch"),
+            (visit_images[-1], "Location Map"),
+        ):
+            photo_assets.append({
+                "filename": asset.filename,
+                "category": category,
+                "content": asset.content,
+            })
     output = None
     extension = ""
     mime_type = ""

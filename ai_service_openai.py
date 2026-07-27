@@ -1027,6 +1027,42 @@ def _deterministic_asset_extract(filename, extracted_text, source_kind):
     else:
         output["builtup_area_as_per_docs"] = docs_bua
 
+    if source_kind == "property_document":
+        output["title_document_number"] = _labeled_text(
+            compact,
+            (
+                r"title\s+document\s*(?:no|number)?",
+                r"document\s*(?:no|number)",
+                r"e[\s-]*registration\s*(?:no|number)",
+            ),
+            120,
+        )
+        output["land_tenure"] = _labeled_text(
+            compact,
+            (r"lease\s*hold\s+or\s+free\s*hold", r"land\s+tenure"),
+            100,
+        )
+        output["approving_authority"] = _labeled_text(
+            compact,
+            (r"approving\s+authority", r"sanctioning\s+authority"),
+            160,
+        )
+        output["plan_details"] = _labeled_text(
+            compact,
+            (r"details\s+of\s+approved\s+plan", r"sanctioned\s+plan"),
+            500,
+        )
+        output["construction_permission"] = _labeled_text(
+            compact,
+            (r"construction\s+permission(?:\s+number\s+and\s+date)?",),
+            250,
+        )
+        output["property_usage_as_per_docs"] = _labeled_text(
+            compact,
+            (r"property\s+usage\s+as\s+per\s+(?:document|docs?)", r"land\s+use"),
+            120,
+        )
+
     boundary_target = "site" if source_kind == "visit_data" else "docs"
     for direction in ("north", "south", "east", "west"):
         output[f"{direction}_boundary_as_per_{boundary_target}"] = _labeled_text(
@@ -1088,6 +1124,20 @@ def _deterministic_asset_extract(filename, extracted_text, source_kind):
     output["property_age_years"] = _number_after(
         compact, (r"age\s+of\s+(?:the\s+)?property", r"property\s+age")
     )
+    output["construction_year"] = _number_after(
+        compact,
+        (r"year\s+of\s+construction", r"construction\s+year", r"\byoc\b"),
+    )
+    output["residual_age_years"] = _number_after(
+        compact, (r"residual\s+age", r"remaining\s+life")
+    )
+    if output["property_age_years"] and not output["residual_age_years"]:
+        try:
+            output["residual_age_years"] = str(
+                max(0, 60 - int(float(output["property_age_years"])))
+            )
+        except (TypeError, ValueError):
+            pass
     output["registration_number"] = _first_match([
         r"(?im)(?:registration|reg(?:istration)?\.?)\s*(?:no|number)"
         r"\s*[:=\-|]?\s*([A-Z0-9/\-]{4,60})",
