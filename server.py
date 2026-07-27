@@ -1148,7 +1148,30 @@ def forgot_password():
         ).first() or EmailAccount.query.filter_by(active=True).order_by(
             EmailAccount.created_at.asc()
         ).first()
+        recovery_code = os.getenv("ADMIN_RECOVERY_CODE", "").strip()
+        recovery_available = (
+            address == os.getenv(
+                "ADMIN_EMAIL", "sakshamvaluer@yahoo.com"
+            ).strip().lower()
+            and len(recovery_code) >= 12
+        )
         if not account:
+            if recovery_available:
+                session["password_reset"] = {
+                    "user_id": user.id,
+                    "email": user.email,
+                    "code_hash": generate_password_hash(recovery_code),
+                    "expires_at": now + 900,
+                    "attempts": 0,
+                    "recovery": True,
+                }
+                session["password_reset_last_sent"] = now
+                flash(
+                    "Linked mailbox available nahi hai. Administrator recovery "
+                    "code se password reset karein.",
+                    "success",
+                )
+                return redirect(url_for("reset_password"))
             flash(
                 "Password reset code bhejne ke liye pehle se linked Gmail/Yahoo "
                 "account chahiye. Local administrator se reset karwayein.",
@@ -1159,6 +1182,22 @@ def forgot_password():
         try:
             send_password_reset_code(account, user.email, code)
         except Exception:
+            if recovery_available:
+                session["password_reset"] = {
+                    "user_id": user.id,
+                    "email": user.email,
+                    "code_hash": generate_password_hash(recovery_code),
+                    "expires_at": now + 900,
+                    "attempts": 0,
+                    "recovery": True,
+                }
+                session["password_reset_last_sent"] = now
+                flash(
+                    "Email service unavailable hai. Administrator recovery "
+                    "code se password reset karein.",
+                    "success",
+                )
+                return redirect(url_for("reset_password"))
             flash(
                 "Reset code email nahi ho paya. Internet aur linked Gmail/Yahoo "
                 "app password check karke dobara try karein.",
@@ -1186,7 +1225,7 @@ def reset_password():
         flash("Reset code expire ho gaya. Naya code mangayein.", "error")
         return redirect(url_for("forgot_password"))
     if request.method == "POST":
-        code = re.sub(r"\D", "", request.form.get("code", ""))
+        code = request.form.get("code", "").strip()
         new_password = request.form.get("new_password", "")
         confirm_password = request.form.get("confirm_password", "")
         if int(state.get("attempts", 0)) >= 5:

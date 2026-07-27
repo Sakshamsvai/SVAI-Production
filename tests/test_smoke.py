@@ -133,6 +133,41 @@ class SvaiSmokeTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 302)
 
+    def test_forgot_password_uses_admin_recovery_when_smtp_is_unavailable(self):
+        address = "recovery-admin@example.com"
+        recovery_code = "SVAI-Recovery-4827"
+        with app.app_context():
+            user = User(
+                email=address,
+                password_hash=generate_password_hash("OldPassword123!"),
+                name="Recovery Admin",
+            )
+            db.session.add(user)
+            db.session.commit()
+
+        with patch.dict(os.environ, {
+            "ADMIN_EMAIL": address,
+            "ADMIN_RECOVERY_CODE": recovery_code,
+        }), patch(
+            "server.send_password_reset_code",
+            side_effect=OSError("SMTP unavailable"),
+        ):
+            response = self.client.post("/forgot-password", data={
+                "_csrf_token": self.csrf(),
+                "email": address,
+            })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/reset-password")
+
+        response = self.client.post("/reset-password", data={
+            "_csrf_token": self.csrf(),
+            "code": recovery_code,
+            "new_password": "RecoveredPassword123!",
+            "confirm_password": "RecoveredPassword123!",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/login")
+
     def test_free_local_document_extraction_and_profile(self):
         document_text = (
             "Technical Valuation Report\n"
