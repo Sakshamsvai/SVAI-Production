@@ -1,5 +1,7 @@
 # SVAI Production — OpenAI Edition
 
+Production deployment: https://svai-valuation-app.onrender.com
+
 SVAI is an end-to-end property valuation workflow for Saksham Associate:
 
 Gmail/Yahoo → valuation-only MIS → visit ZIP/photos → property documents →
