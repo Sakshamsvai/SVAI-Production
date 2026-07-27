@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+{% block content %}
+{% set profile = case_profile.get('case_profile', {}) if case_profile else {} %}
+<div class="section-head">
+  <div>
+    <h1>Case #{{ case.id }} · {{ case.customer_name or case.application_number or 'Pending details' }}</h1>
+    <p>{{ case.application_number or 'Application no. pending' }} · {{ case.bank_name or 'Bank pending' }} · {{ case.status }}</p>
+  </div>
+  <form method="post" action="{{ url_for('archive_case', case_id=case.id) }}">
+    <button class="danger" data-confirm="Archive or reopen this case?">{{ "Reopen" if case.archived else "Archive Case" }}</button>
+  </form>
+</div>
+
+<section class="card">
+  <div class="step-title"><span>1</span><div><h2>Case Information</h2><p>Email subject/body se aaye customer name aur application number ko yahan review karein.</p></div></div>
+  <form method="post" action="{{ url_for('update_case', case_id=case.id) }}" class="form-grid three">
+    <label>Application No.<input name="application_number" value="{{ case.application_number or '' }}"></label>
+    <label>Customer Name<input name="customer_name" value="{{ case.customer_name or '' }}"></label>
+    <label>Contact Number<input name="contact_number" value="{{ case.contact_number or '' }}"></label>
+    <label>Bank Name<input name="bank_name" value="{{ case.bank_name or '' }}"></label>
+    <label>Branch<input name="branch_name" value="{{ case.branch_name or '' }}"></label>
+    <label>Case Type<select name="case_type">
+      <option value="">Pending / Not found</option>
+      {% for type in ["Fresh","Subsequent","Part / Tranche","Revisit","NPA","LAP","Home Loan","Construction","Purchase","Resale","Plot Purchase","Purchase + Construction","Self-Construction","Balance Transfer"] %}
+      <option {% if case.case_type==type %}selected{% endif %}>{{ type }}</option>{% endfor %}
+    </select></label>
+    <label>Visit By<input name="visit_by" value="{{ case.visit_by or '' }}"></label>
+    <label>Status<select name="status">
+      {% for status in ["Files Pending","Portal Pending","New - Email","Email Parsed - Review","Correction Pending","Email Correction Applied - Review","Files Uploaded - Review Pending","Files Uploaded - AI Pending","Report Format Uploaded","Local Files Processed - Review Data","AI Processed - Review Data","Source Data Reviewed","Valuation Completed","Draft Report Generated","Report Generated","Completed"] %}
+      <option {% if case.status==status %}selected{% endif %}>{{ status }}</option>{% endfor %}
+    </select></label>
+    <label class="full">Property Address<textarea name="property_address" rows="3">{{ case.property_address or '' }}</textarea></label>
+    <button class="full">Save Case Details</button>
+  </form>
+</section>
+
+<section class="workflow-grid">
+  <div class="card workflow-step source-card docs-source">
+    <div class="source-badge docs">AS PER DOCUMENTS</div>
+    <div class="step-title"><span>2</span><div><h2>Upload Property Documents</h2><p>Registry, title papers, patta, sanctioned map, tax/electricity document. Inhi files se legal address, document area aur document boundaries aayengi.</p></div></div>
+    <form method="post" enctype="multipart/form-data" action="{{ url_for('upload_property_documents', case_id=case.id) }}" class="stack compact-stack">
+      <input type="file" name="files" accept=".zip,.jpg,.jpeg,.png,.webp,.pdf,.docx,.xlsx" multiple required>
+      <button>Upload Property Documents</button>
+    </form>
+  </div>
+
+  <div class="card workflow-step source-card site-source">
+    <div class="source-badge site">AS PER ACTUAL / SITE</div>
+    <div class="step-title"><span>3</span><div><h2>Upload Visit Form (All Pages)</h2><p>Engineer ke handwritten form ke 1/2/3/4/5 sab pages aur MP Kisan app ka khasra screenshot ek saath select karein. Ye files site photos se alag rahengi.</p></div></div>
+    <form method="post" enctype="multipart/form-data" action="{{ url_for('upload_visit_form_files', case_id=case.id) }}" class="stack compact-stack">
+      <input type="file" name="files" accept=".zip,.jpg,.jpeg,.png,.webp,.pdf,.docx,.xlsx" multiple required>
+      <button class="green">Upload Visit Form Pages</button>
+    </form>
+  </div>
+
+  <div class="card workflow-step">
+    <div class="step-title"><span>4</span><div><h2>Upload Site Photos</h2><p>Front elevation, side views, road/distant view, selfie, kitchen aur interior photos. Yahan engineer form upload na karein.</p></div></div>
+    <form method="post" enctype="multipart/form-data" action="{{ url_for('upload_visit_files', case_id=case.id) }}" class="stack compact-stack">
+      <input type="file" name="files" accept=".zip,.jpg,.jpeg,.png,.webp" multiple required>
+      <button>Upload Property Photos</button>
+    </form>
+  </div>
+
+  <div class="card workflow-step">
+    <div class="step-title"><span>5</span><div><h2>Upload Report Format</h2><p>Is case ke bank ka original valuation Excel/Word format. Layout ko badla nahi jayega.</p></div></div>
+    <form method="post" enctype="multipart/form-data" action="{{ url_for('upload_case_template', case_id=case.id) }}" class="stack compact-stack">
+      <input type="hidden" name="bank_name" value="{{ case.bank_name or '' }}">
+      <input type="file" name="template" accept=".xlsx,.xlsm,.docx" required>
+      <button>Upload Valuation Format</button>
+    </form>
+  </div>
+
+  <div class="card workflow-step ai-step">
+    <div class="step-title"><span>6</span><div><h2>Read & Arrange Files</h2><p>System Property Documents aur Visit Form ko source ke hisab se alag padhega; Site Photos sirf photo section mein lagengi.</p></div></div>
+    <form method="post" action="{{ url_for('process_case_ai', case_id=case.id) }}">
+      <button class="green">Process All Files</button>
+    </form>
+    <p class="ai-state">
+      {% if document_ai_enabled %}
+        Paid ChatGPT enabled ({{ ai_model }}) + free local fallback.
+      {% else %}
+        Free Local Mode active. Scanned handwriting/images may need manual entry.
+      {% endif %}
+    </p>
+  </div>
+</section>
+
+<section class="card">
+  <div class="section-head"><div><h2>Uploaded Case Files</h2><p>Photo category and extracted facts can be reviewed before report generation.</p></div></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Type</th><th>Category</th><th>File</th><th>AI / Extracted Data</th><th></th></tr></thead>
+      <tbody>
+      {% for asset in assets %}
+      <tr>
+        <td><span class="pill">{{ asset.asset_type }}</span></td>
+        <td>{{ asset.category or '' }}</td>
+        <td><a href="{{ url_for('download_asset', asset_id=asset.id) }}">{{ asset.filename }}</a></td>
+        <td class="json-cell">
+          {% if extraction.get(asset.id) %}<pre>{{ extraction.get(asset.id) | tojson(indent=2) }}</pre>
+          {% elif asset.extracted_text %}<span>{{ asset.extracted_text[:300] }}</span>
+          {% else %}—{% endif %}
+        </td>
+        <td><form method="post" action="{{ url_for('delete_asset', asset_id=asset.id) }}"><button class="small danger" data-confirm="Delete this file?">Delete</button></form></td>
+      </tr>
+      {% else %}<tr><td colspan="5" class="empty">No files uploaded.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card source-review">
+  <div class="section-head">
+    <div><h2>Source-wise Report Data — Check & Save</h2><p>Left side sirf uploaded Property Documents se hai. Right side sirf Visit Form/MP Kisan screenshot se hai. Galat ya unreadable value ko yahin correct karein.</p></div>
+  </div>
+  <form method="post" action="{{ url_for('save_source_review', case_id=case.id) }}" class="source-review-grid">
+    <div class="source-column docs-column">
+      <h3>As per Documents</h3>
+      <p class="note">Registry/patta/title papers ki legal details</p>
+      <label>Owner Name as per Documents<input name="owner_name" value="{{ profile.get('owner_name', '') }}"></label>
+      <label>Title Document Number<input name="title_document_number" value="{{ profile.get('title_document_number', '') }}"></label>
+      <div class="form-grid two">
+        <label>Registration Number<input name="registration_number" value="{{ profile.get('registration_number', '') }}"></label>
+        <label>Registration Date<input name="registration_date" value="{{ profile.get('registration_date', '') }}"></label>
+      </div>
+      <label>Address as per Documents<textarea name="property_address_as_per_docs" rows="4">{{ profile.get('property_address_as_per_docs', '') }}</textarea></label>
+      <label>Khasra / Survey / Plot No. as per Documents<input name="survey_khasra_plot_no_as_per_docs" value="{{ profile.get('survey_khasra_plot_no_as_per_docs') or profile.get('survey_khasra_plot_no', '') }}"></label>
+      <label>Land / Plot Area as per Documents<input name="land_area_as_per_docs" value="{{ profile.get('land_area_as_per_docs', '') }}"></label>
+      <label>Built-up Area as per Documents<input name="builtup_area_as_per_docs" value="{{ profile.get('builtup_area_as_per_docs', '') }}"></label>
+      <label>North Boundary — Documents<input name="north_boundary_as_per_docs" value="{{ profile.get('north_boundary_as_per_docs', '') }}"></label>
+      <label>South Boundary — Documents<input name="south_boundary_as_per_docs" value="{{ profile.get('south_boundary_as_per_docs', '') }}"></label>
+      <label>East Boundary — Documents<input name="east_boundary_as_per_docs" value="{{ profile.get('east_boundary_as_per_docs', '') }}"></label>
+      <label>West Boundary — Documents<input name="west_boundary_as_per_docs" value="{{ profile.get('west_boundary_as_per_docs', '') }}"></label>
+      <label>Property Usage as per Documents<input name="property_usage_as_per_docs" value="{{ profile.get('property_usage_as_per_docs', '') }}"></label>
+      <label>Land Tenure<input name="land_tenure" value="{{ profile.get('land_tenure', '') }}"></label>
+      <label>Approving Authority<input name="approving_authority" value="{{ profile.get('approving_authority', '') }}"></label>
+      <label>Plan Details<textarea name="plan_details" rows="2">{{ profile.get('plan_details', '') }}</textarea></label>
+      <label>Construction Permission<input name="construction_permission" value="{{ profile.get('construction_permission', '') }}"></label>
+    </div>
+
+    <div class="source-column site-column">
+      <h3>As per Actual / Site</h3>
+      <p class="note">Engineer Visit Form aur MP Kisan screenshot ki details</p>
+      <label>Actual Address at Site<textarea name="property_address_as_per_site" rows="4">{{ profile.get('property_address_as_per_site', '') }}</textarea></label>
+      <label>Actual Khasra No. (MP Kisan / Visit Form)<input name="survey_khasra_plot_no_as_per_site" value="{{ profile.get('survey_khasra_plot_no_as_per_site', '') }}"></label>
+      <label>Actual Land / Plot Area<input name="land_area_as_per_site" value="{{ profile.get('land_area_as_per_site', '') }}"></label>
+      <label>Actual Built-up Area<input name="builtup_area_as_per_site" value="{{ profile.get('builtup_area_as_per_site', '') }}"></label>
+      <label>North Boundary — Actual<input name="north_boundary_as_per_site" value="{{ profile.get('north_boundary_as_per_site', '') }}"></label>
+      <label>South Boundary — Actual<input name="south_boundary_as_per_site" value="{{ profile.get('south_boundary_as_per_site', '') }}"></label>
+      <label>East Boundary — Actual<input name="east_boundary_as_per_site" value="{{ profile.get('east_boundary_as_per_site', '') }}"></label>
+      <label>West Boundary — Actual<input name="west_boundary_as_per_site" value="{{ profile.get('west_boundary_as_per_site', '') }}"></label>
+      <label>Actual Property Usage<input name="property_usage_as_per_site" value="{{ profile.get('property_usage_as_per_site', '') }}"></label>
+      <div class="form-grid two">
+        <label>Road Width<input name="road_width" value="{{ profile.get('road_width', '') }}"></label>
+        <label>Road Type<input name="road_type" value="{{ profile.get('road_type', '') }}"></label>
+        <label>Latitude<input name="latitude" value="{{ profile.get('latitude', '') }}"></label>
+        <label>Longitude<input name="longitude" value="{{ profile.get('longitude', '') }}"></label>
+        <label>Occupancy<input name="occupancy" value="{{ profile.get('occupancy', '') }}"></label>
+        <label>Person Met<input name="person_met" value="{{ profile.get('person_met', '') }}"></label>
+        <label>Visit Engineer<input name="visit_engineer" value="{{ profile.get('visit_engineer', '') }}"></label>
+        <label>Visit Date<input name="visit_date" value="{{ profile.get('visit_date', '') }}"></label>
+        <label>Structure Type<input name="structure_type" value="{{ profile.get('structure_type', '') }}"></label>
+        <label>Construction Quality<input name="construction_quality" value="{{ profile.get('construction_quality', '') }}"></label>
+        <label>Construction Year<input name="construction_year" value="{{ profile.get('construction_year', '') }}"></label>
+        <label>Property Age<input name="property_age_years" value="{{ profile.get('property_age_years', '') }}"></label>
+        <label>Residual Age<input name="residual_age_years" value="{{ profile.get('residual_age_years', '') }}"></label>
+        <label>Number of Floors<input name="number_of_floors" value="{{ profile.get('number_of_floors', '') }}"></label>
+      </div>
+      <label>Floor-wise Usage<textarea name="floor_wise_usage" rows="2">{{ profile.get('floor_wise_usage', '') }}</textarea></label>
+      <label>Room Configuration<textarea name="room_configuration" rows="2">{{ profile.get('room_configuration', '') }}</textarea></label>
+    </div>
+    <button class="full green">Save Verified Document + Actual Site Data</button>
+  </form>
+  {% if profile %}
+  <details><summary>View complete extracted profile</summary><pre class="profile-json">{{ profile | tojson(indent=2) }}</pre></details>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="step-title"><span>7</span><div><h2>Valuation Calculation & Manual Review</h2><p>Extracted details verify karein. Market rates/areas engineer ke actual data se confirm karke save karein; calculation paid GPT ke bina bhi chalegi.</p></div></div>
+  <form method="post" action="{{ url_for('save_valuation', case_id=case.id) }}" class="form-grid four">
+    {% set v = valuation %}
+    <label>Land Area<input type="number" step="any" name="land_area" value="{{ v.land_area if v else 0 }}"></label>
+    <label>Market Land Rate<input type="number" step="any" name="land_rate" value="{{ v.land_rate if v else 0 }}"></label>
+    <label>Built-up Area<input type="number" step="any" name="builtup_area" value="{{ v.builtup_area if v else 0 }}"></label>
+    <label>Construction Rate<input type="number" step="any" name="construction_rate" value="{{ v.construction_rate if v else 0 }}"></label>
+    <label>Age (Years)<input type="number" step="any" name="age_years" value="{{ v.age_years if v else 0 }}"></label>
+    <label>Depreciation %<input type="number" step="any" name="depreciation_percent" value="{{ v.depreciation_percent if v else 0 }}"></label>
+    <label>Govt. Land Rate<input type="number" step="any" name="govt_land_rate" value="{{ v.govt_land_rate if v else 0 }}"></label>
+    <label>Govt. Construction Rate<input type="number" step="any" name="govt_construction_rate" value="{{ v.govt_construction_rate if v else 0 }}"></label>
+    <label>Conservative %<input type="number" step="any" name="conservative_percent" value="{{ v.conservative_percent if v else 80 }}"></label>
+    <label>Distress / QSV %<input type="number" step="any" name="distress_percent" value="{{ v.distress_percent if v else 70 }}"></label>
+    <label class="full">Remarks<textarea name="remarks" rows="3">{{ v.remarks if v else '' }}</textarea></label>
+    <button class="full green">Calculate & Save Valuation</button>
+  </form>
+  {% if valuation %}
+  <div class="result-grid">
+    <div><span>Land Value</span><b>₹ {{ "{:,.0f}".format(valuation.land_value or 0) }}</b></div>
+    <div><span>Net Building Value</span><b>₹ {{ "{:,.0f}".format(valuation.net_building_value or 0) }}</b></div>
+    <div><span>Market Value</span><b>₹ {{ "{:,.0f}".format(valuation.market_value or 0) }}</b></div>
+    <div><span>Conservative Value</span><b>₹ {{ "{:,.0f}".format(valuation.conservative_value or 0) }}</b></div>
+    <div><span>Distress / QSV</span><b>₹ {{ "{:,.0f}".format(valuation.distress_value or 0) }}</b></div>
+    <div><span>Government Value</span><b>₹ {{ "{:,.0f}".format(valuation.govt_value or 0) }}</b></div>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card report-card">
+  <h2>Generate Draft Report</h2>
+  <p>Uploaded bank format select karein. SVAI isi original file ki sheet/page/layout ko bina तोड़े data aur photos fill karega. Jo detail clear nahi hai woh review ke liye blank rahegi.</p>
+  {% if case.status == "Portal Pending" %}
+  <p class="portal-warning">Ye online portal case hai, isliye status Portal Pending rahega aur local report generate nahi hogi.</p>
+  {% endif %}
+  <form method="post" action="{{ url_for('generate_report', case_id=case.id) }}" class="upload-row">
+    <select name="template_id">
+      <option value="">Case ke uploaded bank format ko use karein</option>
+      {% for template in templates %}
+      <option value="{{ template.id }}">{{ template.category or 'Bank' }} — {{ template.filename }}{% if template.asset_type == 'case_template' %} (This Case){% endif %}</option>
+      {% endfor %}
+    </select>
+    <button class="green" {% if case.status == "Portal Pending" %}disabled{% endif %}>Generate & Download Draft</button>
+  </form>
+  <a href="{{ url_for('templates_page') }}">Manage global bank formats</a>
+</section>
+{% endblock %}

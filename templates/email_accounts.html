@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <div class="section-head">
+    <div>
+      <h1>Gmail / Yahoo Connection</h1>
+      {% if accounts %}
+        <p>Your linked email is saved securely. Fetching MIS does not ask for the 16-character app password again.</p>
+      {% else %}
+        <p>Link the mailbox once. After that, the saved connection is used automatically for every MIS fetch.</p>
+      {% endif %}
+    </div>
+    <span class="ai-badge {{ 'ready' if accounts else 'off' }}">{{ 'Connected' if accounts else 'Not connected' }}</span>
+  </div>
+
+  <details class="advanced-workflow" {% if not accounts %}open{% endif %}>
+    <summary>{{ 'Add or Reconnect Gmail / Yahoo' if accounts else 'Link Gmail / Yahoo' }}</summary>
+    <p class="note">The 16-character app password is required only while linking or reconnecting. Your normal mailbox password is not accepted.</p>
+    <form method="post" class="form-grid three">
+      <label>Email ID<input type="email" name="email" placeholder="yourmail@gmail.com" required></label>
+      <label>16-character App Password<input type="password" name="password" minlength="16" maxlength="19" autocomplete="new-password" required></label>
+      <label>Provider<select name="provider" required><option value="gmail">Gmail</option><option value="yahoo">Yahoo</option></select></label>
+      <label>Bank Name<input name="bank_name" placeholder="Optional bank label"></label>
+      <button class="green">Verify & Save Connection</button>
+    </form>
+  </details>
+  <p class="note">Security: the app password is encrypted before it is saved. The MIS keeps one stable row per application number, accepts only valuation/technical initiation mail, and ignores duplicate follow-up requests.</p>
+</section>
+
+<section class="card">
+  <div class="section-head">
+    <div><h2>Linked Accounts</h2><p>Default range is the 1st of this month through today.</p></div>
+  </div>
+  <form class="date-toolbar" method="post" action="{{ url_for('fetch_all_emails') }}">
+    <label>From<input type="date" name="from" value="{{ date_from.isoformat() }}"></label>
+    <label>To<input type="date" name="to" value="{{ date_to.isoformat() }}"></label>
+    <button class="green">Fetch All Valuation Emails</button>
+  </form>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Email</th><th>Provider</th><th>Bank</th><th>Last Fetch</th><th>Actions</th></tr></thead>
+    <tbody>{% for a in accounts %}
+      <tr>
+        <td><strong>{{ a.email }}</strong><br><span class="status-pill">Connected & saved</span></td>
+        <td>{{ a.provider|title }}</td>
+        <td>{{ a.bank_name or '-' }}</td>
+        <td>{{ a.last_fetch_at or 'Never' }}</td>
+        <td class="actions">
+          <form method="post" action="{{ url_for('fetch_one_email', account_id=a.id) }}">
+            <input type="hidden" name="from" value="{{ date_from.isoformat() }}">
+            <input type="hidden" name="to" value="{{ date_to.isoformat() }}">
+            <button class="small green">Fetch</button>
+          </form>
+          <form method="post" action="{{ url_for('delete_email_account', account_id=a.id) }}">
+            <button class="small danger" data-confirm="Remove this linked email?">Remove</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}<tr><td colspan="5" class="empty">No Gmail or Yahoo account linked.</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}SVAI{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+{% if session.get('user_id') %}
+<header class="topbar">
+  <div>
+    <div class="brand">SVAI</div>
+    <div class="subtitle">Smart Valuation Artificial Intelligence · Saksham Associate</div>
+  </div>
+  <nav>
+    <a class="dashboard-link" href="{{ url_for('dashboard') }}">🏠 Dashboard / MIS</a>
+    <a href="{{ url_for('new_case') }}">New Case</a>
+    <a href="{{ url_for('email_accounts') }}">Gmail / Yahoo</a>
+    <a href="{{ url_for('templates_page') }}">Report Formats</a>
+    <a href="{{ url_for('settings_page') }}">Settings</a>
+    <a class="danger-link" href="{{ url_for('logout') }}">Logout</a>
+  </nav>
+</header>
+{% endif %}
+<main class="{% block mainclass %}container{% endblock %}">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <div class="alert {{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+<script>
+const csrfToken = {{ csrf_token | tojson }};
+document.querySelectorAll('form[method="post"], form[method="POST"]').forEach(form => {
+  if (!form.querySelector('input[name="_csrf_token"]')) {
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "_csrf_token";
+    input.value = csrfToken;
+    form.prepend(input);
+  }
+});
+document.querySelectorAll("[data-confirm]").forEach(el => {
+  el.addEventListener("click", event => {
+    if (!confirm(el.dataset.confirm)) event.preventDefault();
+  });
+});
+</script>
+</body>
+</html>

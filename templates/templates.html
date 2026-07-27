@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>Bank Valuation Report Formats</h1>
+  <p>DCB, SBFC, Laxmi India and Ummeed reference formats are already included. You can also upload any bank's original Excel or Word valuation format; ChatGPT and label mapping fill it without changing the original uploaded file.</p>
+  <form method="post" enctype="multipart/form-data" class="form-grid three">
+    <label>Bank Name<input name="bank_name" required></label>
+    <label>Report Format<input type="file" name="template" accept=".xlsx,.xlsm,.docx" required></label>
+    <button>Upload Report Format</button>
+  </form>
+  <details>
+    <summary>Optional exact-placement tokens</summary>
+    <div class="token-list">
+      {{ "{{APPLICATION_NUMBER}}" }}, {{ "{{CUSTOMER_NAME}}" }}, {{ "{{OWNER_NAME}}" }},
+      {{ "{{CONTACT_NUMBER}}" }}, {{ "{{PROPERTY_ADDRESS_DOCS}}" }},
+      {{ "{{PROPERTY_ADDRESS_SITE}}" }}, {{ "{{BANK_NAME}}" }}, {{ "{{BRANCH_NAME}}" }},
+      {{ "{{CASE_TYPE}}" }}, {{ "{{REPORT_DATE}}" }}, {{ "{{VISIT_DATE}}" }},
+      {{ "{{LAND_AREA_DOCS}}" }}, {{ "{{LAND_AREA_SITE}}" }}, {{ "{{LAND_RATE}}" }},
+      {{ "{{BUILTUP_AREA_DOCS}}" }}, {{ "{{BUILTUP_AREA_SITE}}" }},
+      {{ "{{CONSTRUCTION_RATE}}" }}, {{ "{{MARKET_VALUE}}" }},
+      {{ "{{CONSERVATIVE_VALUE}}" }}, {{ "{{DISTRESS_VALUE}}" }},
+      {{ "{{GOVT_VALUE}}" }}, {{ "{{REMARKS}}" }}
+    </div>
+  </details>
+</section>
+<section class="card">
+  <h2>Available Formats</h2>
+  <div class="table-wrap"><table><thead><tr><th>Bank</th><th>Filename</th><th>Uploaded</th><th></th></tr></thead>
+  <tbody>{% for t in templates %}<tr><td>{{ t.category }}</td><td>{{ t.filename }}</td><td>{{ t.created_at }}</td>
+  <td><form method="post" action="{{ url_for('delete_template', asset_id=t.id) }}"><button class="small danger" data-confirm="Delete this report format?">Delete</button></form></td></tr>
+  {% else %}<tr><td colspan="4" class="empty">No report format available.</td></tr>{% endfor %}</tbody></table></div>
+</section>
+{% endblock %}

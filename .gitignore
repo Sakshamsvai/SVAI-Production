@@ -1,0 +1,16 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+svai.db
+instance/
+uploads/
+outputs/
+demo_outputs/
+artifact_work/
+*.db
+*.sqlite
+*.log
+.pytest_cache/
+.DS_Store

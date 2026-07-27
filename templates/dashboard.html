@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="stats">
+  <div class="stat"><span>Active Cases</span><b>{{ stats.cases }}</b></div>
+  <div class="stat"><span>Property Documents</span><b>{{ stats.documents }}</b></div>
+  <div class="stat"><span>Site Photos</span><b>{{ stats.photos }}</b></div>
+  <div class="stat"><span>Generated Reports</span><b>{{ stats.reports }}</b></div>
+</section>
+
+<section class="card">
+  <div class="section-head">
+    <div>
+      <h1>Monthly Valuation MIS</h1>
+      <p>Only valuation and technical cases: Fresh, Subsequent, Part/Tranche, Revisit, NPA, Construction, Purchase and LAP.</p>
+    </div>
+    <span class="ai-badge {{ 'ready' if ai_enabled else 'off' }}">
+      ChatGPT · {{ ai_model if ai_enabled else 'API key required' }}
+    </span>
+  </div>
+
+  <form class="date-toolbar" method="get">
+    <label>From<input type="date" name="from" value="{{ date_from.isoformat() }}"></label>
+    <label>To<input type="date" name="to" value="{{ date_to.isoformat() }}"></label>
+    <label class="grow">Search<input name="q" value="{{ search }}" placeholder="Application no., customer, bank or address"></label>
+    <label class="inline-check"><input type="checkbox" name="archived" value="1" {% if include_archived %}checked{% endif %}> Archived</label>
+    <button>View MIS</button>
+  </form>
+
+  <div class="actions toolbar-actions">
+    <form method="post" action="{{ url_for('fetch_all_emails') }}">
+      <input type="hidden" name="from" value="{{ date_from.isoformat() }}">
+      <input type="hidden" name="to" value="{{ date_to.isoformat() }}">
+      <button class="green">Fetch Valuation Emails</button>
+    </form>
+    <a class="button secondary" href="{{ url_for('export_mis') }}?from={{ date_from.isoformat() }}&amp;to={{ date_to.isoformat() }}">Download MIS Excel</a>
+    <a class="button" href="{{ url_for('new_case') }}">+ Application No. Se Report</a>
+  </div>
+</section>
+
+<section class="card">
+  <div class="section-head">
+    <div>
+      <h2>{{ date_from.strftime('%d %b %Y') }} – {{ date_to.strftime('%d %b %Y') }}</h2>
+      <p>{{ cases|length }} case(s) shown</p>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table class="mis-table">
+      <thead><tr>
+        <th>SR NO</th><th>Date</th><th>CUSTOMER NAME</th><th>APPLICATION NO</th>
+        <th>CONTACT NUMBER</th><th>BANK</th><th>CASE TYPE</th><th>STATUS</th>
+        <th>ADDRESS</th><th>VISIT BY</th><th>BRANCH</th><th>Action</th>
+      </tr></thead>
+      <tbody>
+      {% for case in cases %}
+        {% set case_date = case.email_received_at or case.created_at %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td>{{ case_date.strftime('%d-%m-%Y') if case_date else '' }}</td>
+          <td><b>{{ case.customer_name or '—' }}</b></td>
+          <td class="mono">{{ case.application_number or '—' }}</td>
+          <td>{{ case.contact_number or '—' }}</td>
+          <td>{{ case.bank_name or '—' }}</td>
+          <td>{{ case.case_type or '—' }}</td>
+          <td><span class="pill">{{ case.status }}</span></td>
+          <td class="address">{{ case.property_address or '—' }}</td>
+          <td>{{ case.visit_by or '—' }}</td>
+          <td>{{ case.branch_name or '—' }}</td>
+          <td><a class="mini-button" href="{{ url_for('case_detail', case_id=case.id) }}">Open</a></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="12" class="empty">No valuation cases found for this date range.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card compact">
+  <h3>Change Login Password</h3>
+  <form class="form-grid three" method="post" action="{{ url_for('change_password') }}">
+    <input type="password" name="current_password" placeholder="Current password" required>
+    <input type="password" name="new_password" placeholder="New password (8+ characters)" required>
+    <button>Change Password</button>
+  </form>
+</section>
+{% endblock %}

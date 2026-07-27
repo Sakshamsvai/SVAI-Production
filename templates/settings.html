@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}SVAI Settings{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Simple Setup</h1>
+    <p>Free Local Mode bina payment ke chalta hai. Paid ChatGPT document reading optional hai.</p>
+  </div>
+</section>
+
+<section class="card">
+  <div class="section-head">
+    <div>
+      <h2>Document Processing</h2>
+      <p>
+        Current mode:
+        <strong>{{ "Paid ChatGPT + Local Fallback" if document_ai_enabled else "Free Local" }}</strong>
+      </p>
+    </div>
+    <span class="ai-badge {{ 'ready' if document_ai_enabled else 'off' }}">
+      {{ "Paid AI On" if document_ai_enabled else "No payment needed" }}
+    </span>
+  </div>
+  <p class="note">
+    Free Local Mode readable PDF, Word and Excel text, email details, MIS,
+    valuation calculation and exact bank report generation chala sakta hai.
+    Handwriting aur scanned image reading ke liye manual review zaroori rahega.
+  </p>
+  <form method="post" class="stack">
+    <label>
+      OpenAI API key (optional)
+      <input type="password" name="openai_api_key" placeholder="sk-..." autocomplete="off">
+    </label>
+    <label>
+      <input
+        type="checkbox"
+        name="enable_paid_document_ai"
+        value="true"
+        {% if document_ai_enabled %}checked{% endif %}
+      >
+      Paid ChatGPT se scanned documents/photos read karna
+    </label>
+    <p>
+      API key banana ho to
+      <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">
+        official OpenAI API key page
+      </a>
+      kholein. ChatGPT Free/Plus aur API billing alag hote hain.
+    </p>
+    <label>
+      Naya SVAI password
+      <input type="password" name="new_password" minlength="8" placeholder="Kam se kam 8 characters">
+    </label>
+    <p>Dono fields optional hain. Jo badalna ho sirf wahi bharein.</p>
+    <button type="submit">Save Settings</button>
+  </form>
+</section>
+{% endblock %}

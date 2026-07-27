@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow quick-start">
+  <div class="step-title">
+    <span>1</span>
+    <div>
+      <h1>Application Number Se Report File Kholein</h1>
+    <p>Bas application number daliye. Agle page par Property Documents, Visit Form, Site Photos aur bank format ke alag-alag saaf upload options milenge.</p>
+    </div>
+  </div>
+  <form method="post" class="stack">
+    <label>Application Number
+      <input name="application_number" placeholder="Jaise H425HLD1885354" required autofocus>
+    </label>
+    <label>Bank Name (optional)
+      <input name="bank_name" placeholder="Email case ho to apne aap aayega">
+    </label>
+    <label class="inline-check portal-check">
+      <input type="checkbox" name="portal_case" value="1">
+      Ye report bank ke online portal par banegi — isko Portal Pending rakhein
+    </label>
+    <button class="green">Application File Kholein</button>
+  </form>
+</section>
+{% endblock %}

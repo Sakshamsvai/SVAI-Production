@@ -1,0 +1,50 @@
+$ErrorActionPreference = "Stop"
+$Repo = "https://github.com/Sakshamsvai/SVAI-Production.git"
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+Write-Host "SVAI Final - Setup, Test and GitHub Push" -ForegroundColor Cyan
+Set-Location $Root
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+  Write-Host "Git not found. Install Git for Windows first." -ForegroundColor Red
+  exit 1
+}
+if (-not (Test-Path ".env")) {
+  Copy-Item ".env.example" ".env"
+  Write-Host ".env created. Local default login will be used." -ForegroundColor Yellow
+}
+if (-not (Test-Path ".venv\Scripts\python.exe")) {
+  if (Get-Command py -ErrorAction SilentlyContinue) {
+    py -3.12 -m venv .venv
+  } elseif (Get-Command python -ErrorAction SilentlyContinue) {
+    python -m venv .venv
+  } else {
+    Write-Host "Python 3.12+ not found." -ForegroundColor Red
+    exit 1
+  }
+}
+
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Write-Host "Running production smoke tests..." -ForegroundColor Yellow
+.\.venv\Scripts\python.exe -m py_compile server.py
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+
+if (-not (Test-Path ".git")) {
+  git init
+}
+git branch -M main
+$origin = git remote get-url origin 2>$null
+if ($LASTEXITCODE -ne 0) {
+  git remote add origin $Repo
+} elseif ($origin -ne $Repo) {
+  git remote set-url origin $Repo
+}
+
+git add .
+git commit -m "Final SVAI production workflow" 2>$null
+git push -u origin main
+
+Write-Host ""
+Write-Host "GitHub push completed." -ForegroundColor Green
+Write-Host "Render will auto-deploy from main branch." -ForegroundColor Green
+Write-Host "Open: https://svai-valuation-app.onrender.com" -ForegroundColor Cyan

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}SVAI Login{% endblock %}
+{% block mainclass %}login-wrap{% endblock %}
+{% block content %}
+<section class="login-card">
+  <div class="login-logo">SVAI</div>
+  <h1>Saksham Valuer Portal</h1>
+  <p>Login to manage valuation cases, MIS and reports.</p>
+  <form method="post" class="stack">
+    <label>Email<input type="email" name="email" required autofocus></label>
+    <label>Password<input type="password" name="password" required></label>
+    <button type="submit">Login</button>
+  </form>
+  <p class="login-help"><a href="{{ url_for('forgot_password') }}">Forgot Password?</a></p>
+</section>
+{% endblock %}
