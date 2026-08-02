@@ -42,6 +42,7 @@ from server import (  # noqa: E402
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
     email_fetch_folders,
+    imap_safe_assignment_folders,
 )
 
 
@@ -602,6 +603,22 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn('"[Gmail]/All Mail"', email_fetch_folders(gmail))
         self.assertIn("INBOX", email_fetch_folders(gmail))
         self.assertEqual(email_fetch_folders(yahoo), ["INBOX", "Archive"])
+
+    def test_email_fetch_includes_custom_incoming_folder_but_not_sent_or_junk(self):
+        class MailboxList:
+            def list(self):
+                return "OK", [
+                    b'(\\HasNoChildren) "/" "INBOX"',
+                    b'(\\HasNoChildren) "/" "LIFC Assignments"',
+                    b'(\\Sent) "/" "[Gmail]/Sent Mail"',
+                    b'(\\Junk) "/" "Spam"',
+                ]
+
+        account = EmailAccount(email="valuer@gmail.com", encrypted_password="x", provider="gmail")
+        folders = imap_safe_assignment_folders(account, MailboxList())
+        self.assertIn('"LIFC Assignments"', folders)
+        self.assertNotIn('"[Gmail]/Sent Mail"', folders)
+        self.assertNotIn("Spam", folders)
 
     def test_email_prefilter_and_regex_extraction(self):
         subject = "Fresh Technical Valuation - APP NO: LAP-2026-0091"

@@ -979,6 +979,40 @@ def email_fetch_folders(account):
     return ["INBOX"]
 
 
+def imap_safe_assignment_folders(account, mail):
+    """Return configured folders plus user-created incoming labels/folders.
+
+    Bank assignment rules can move a message into a custom Gmail label or a
+    Yahoo folder.  Do not scan folders that normally contain mail sent by us,
+    drafts, deleted mail or junk, as those must never create MIS cases.
+    """
+    folders = list(email_fetch_folders(account))
+    known = {folder.strip('"').casefold() for folder in folders}
+    try:
+        status, payload = mail.list()
+    except Exception:
+        return folders
+    if status != "OK":
+        return folders
+
+    blocked_flags = (r"\sent", r"\draft", r"\trash", r"\junk", r"\spam")
+    for raw_folder in payload or []:
+        if not raw_folder:
+            continue
+        line = raw_folder.decode("utf-8", errors="replace") if isinstance(raw_folder, bytes) else str(raw_folder)
+        if any(flag in line.casefold() for flag in blocked_flags):
+            continue
+        quoted = re.findall(r'"((?:\\.|[^"\\])*)"', line)
+        name = (quoted[-1] if quoted else line.rsplit(" ", 1)[-1]).strip()
+        if not name or name.casefold() in known:
+            continue
+        # IMAP requires an argument quoted when the mailbox name contains a
+        # space; names received through LIST are otherwise already exact.
+        folders.append(f'"{name}"' if re.search(r"\s", name) else name)
+        known.add(name.casefold())
+    return folders
+
+
 def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
     created = 0
     updated = 0
@@ -998,7 +1032,7 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
         before = (end_date + timedelta(days=1)).strftime("%d-%b-%Y")
         raw_messages = []
         scanned_folders = []
-        for folder in email_fetch_folders(account):
+        for folder in imap_safe_assignment_folders(account, mail):
             status, _ = mail.select(folder)
             if status != "OK":
                 continue
