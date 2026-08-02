@@ -64,6 +64,13 @@ BANK_DOMAIN_NAMES = {
     "fusionfin": "Fusion Finance",
 }
 
+# A valuation assignment is normally sent by the lender/vendor's own domain.
+# Do not turn the recipient's public mailbox provider into a bank name.
+PUBLIC_MAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "rocketmail.com",
+    "outlook.com", "hotmail.com", "live.com", "msn.com", "icloud.com",
+}
+
 PHOTO_CATEGORIES = (
     "Front Elevation", "Front Side View", "Approach Road", "Distant Property View",
     "Property Selfie", "Kitchen", "Internal Room", "Electricity Meter",
@@ -223,6 +230,8 @@ def _bank_from_sender(sender):
     for token, name in BANK_DOMAIN_NAMES.items():
         if token in domain:
             return name
+    if domain in PUBLIC_MAIL_DOMAINS:
+        return ""
     first = domain.split(".")[0].replace("-", " ")
     return first.title() if first else ""
 
@@ -377,6 +386,11 @@ def deterministic_email_candidate(subject, body, sender=""):
         "promotional offer", "job opening", "collection reminder",
     )
     if any(term in f" {text} " for term in reject_terms):
+        return False
+    # A forwarded/replied trail from Gmail/Yahoo can contain an old technical
+    # assignment.  It is not itself a new bank instruction, so never create a
+    # fresh MIS row from it.  This also prevents "Bank: Gmail" rows.
+    if _sender_domain(sender) in PUBLIC_MAIL_DOMAINS:
         return False
     assignment_hits = sum(term in text for term in VALUATION_TERMS)
     identifiers = bool(re.search(
@@ -663,6 +677,10 @@ def regex_email_extract(subject, body, sender):
         r"(?ims)address\s+of\s+(?:the\s+)?property(?:\s+to\s+be\s+mortgaged"
         r"(?:\s+with\s+pin\s+code)?)?\s*(?:[:=\-]\s*|\n+)"
         r"(.{10,700}?)(?=\n\s*\n|$)",
+        r"(?ims)(?:property\s+location|location\s+of\s+(?:the\s+)?property|"
+        r"site\s+location|collateral\s+property)\s*(?:[:=\-]\s*|\n+)"
+        r"(.{10,700}?)(?=\n\s*(?:mobile|contact|branch|bank|applicant|customer|"
+        r"case|loan|boundar(?:y|ies)|area|land)\b|\n\s*\n|$)",
     ], text, lambda value: _space(value) if _valid_property_address(value) else "")
 
     for key, value in (
@@ -682,10 +700,16 @@ def regex_email_extract(subject, body, sender):
     result["case_type"] = (
         explicit_case_type or _normalize_case_type(text) or result.get("case_type")
     )
+    is_valuation = deterministic_email_candidate(subject, body, sender)
     result.update({
         "bank_name": _bank_from_sender(sender),
-        "is_valuation": deterministic_email_candidate(subject, body, sender),
-        "classification_reason": "Genuine valuation/technical assignment pattern matched",
+        "is_valuation": is_valuation,
+        "classification_reason": (
+            "Genuine valuation/technical assignment pattern matched"
+            if is_valuation else "Ignored: public mailbox sender is not a bank assignment"
+            if _sender_domain(sender) in PUBLIC_MAIL_DOMAINS
+            else "No genuine valuation/technical assignment pattern matched"
+        ),
         "correction_mail": bool(re.search(
             r"(?i)change\s+application\s+id|correct\s+application\s+(?:no|number)",
             text,

@@ -377,6 +377,20 @@ def email_body(message) -> str:
     return "\n".join(normalized).strip()[:25000]
 
 
+def latest_email_body(body: str) -> str:
+    """Keep the current message separate from quoted older email trails.
+
+    Old assignments in a reply/forward must not create a new MIS case.  The
+    newest part is still read for genuine current instructions and facts.
+    """
+    return re.split(
+        r"(?im)^\s*(?:-{2,}\s*original message\s*-{2,}|from\s*:|"
+        r"on .{0,160} wrote\s*:)",
+        str(body or ""),
+        maxsplit=1,
+    )[0].strip()
+
+
 def ai_extract_email(subject: str, body: str, sender: str):
     return extract_valuation_email(subject, body, sender)
 
@@ -650,12 +664,7 @@ def is_followup_email(subject, body=""):
         subject_text,
     ):
         return True
-    latest_body = str(body or "")
-    latest_body = re.split(
-        r"(?im)^\s*(?:-{2,}\s*original message\s*-{2,}|from\s*:|on .{0,160} wrote\s*:)",
-        latest_body,
-        maxsplit=1,
-    )[0]
+    latest_body = latest_email_body(body)
     latest_body = re.sub(r"\s+", " ", latest_body[:2500]).strip()
     combined = f"{subject_text}\n{latest_body}"
     followup_patterns = (
@@ -988,7 +997,7 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
             message = email_lib.message_from_bytes(raw)
             subject = decode_header_value(message.get("Subject", ""))
             sender = decode_header_value(message.get("From", ""))
-            body = email_body(message)
+            body = latest_email_body(email_body(message))
             followup_mail = is_followup_email(subject, body)
             unique_id = message.get("Message-ID") or f"{account.email}:{msg_id.decode()}"
             received = None

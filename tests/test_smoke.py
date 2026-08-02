@@ -762,6 +762,26 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(lifc["branch_name"], "Vidisha")
         self.assertEqual(lifc.get("property_address", ""), "")
 
+        lifc_assignment = regex_email_extract(
+            "LIFC - TECHNICAL Case Assignment | LAPAST100029996 | Order No - 57902 | ASHTA (MP) Branch",
+            "Applicant Name: Jitendra\nVendor Code: TECH073\n"
+            "Vendor Dashboard: https://login.synofin.tech/?app_id=vendor_portal",
+            "notifications@lifl.in",
+        )
+        self.assertTrue(lifc_assignment["is_valuation"])
+        self.assertEqual(lifc_assignment["bank_name"], "Laxmi India Finance")
+        self.assertEqual(lifc_assignment["application_number"], "LAPAST100029996")
+        self.assertEqual(lifc_assignment["customer_name"], "Jitendra")
+        self.assertEqual(lifc_assignment["branch_name"], "Ashta (Mp)")
+
+        public_mail_trail = regex_email_extract(
+            "Technical case assignment - TENOR-20YRS",
+            "Applicant: SATYAPAL SINGH JADON\nCase type: Purchase + Construction",
+            "somebody@gmail.com",
+        )
+        self.assertFalse(public_mail_trail["is_valuation"])
+        self.assertEqual(public_mail_trail["bank_name"], "")
+
     def test_attachment_fills_missing_real_mis_fields(self):
         details = {
             "is_valuation": True,
