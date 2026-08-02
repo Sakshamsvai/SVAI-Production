@@ -1225,11 +1225,15 @@ def forgot_password():
         if not user:
             flash("Registered SVAI email nahi mili.", "error")
             return render_template("forgot_password.html")
-        account = EmailAccount.query.filter_by(
-            email=address, active=True
-        ).first() or EmailAccount.query.filter_by(active=True).order_by(
+        active_accounts = EmailAccount.query.filter_by(active=True).order_by(
             EmailAccount.created_at.asc()
-        ).first()
+        ).all()
+        # Prefer the recipient's own mailbox, but do not let one stale app
+        # password prevent recovery when another linked mailbox can send.
+        accounts = sorted(
+            active_accounts,
+            key=lambda candidate: candidate.email.strip().lower() != address,
+        )
         recovery_code = os.getenv("ADMIN_RECOVERY_CODE", "").strip()
         recovery_available = (
             address == os.getenv(
@@ -1237,7 +1241,7 @@ def forgot_password():
             ).strip().lower()
             and len(recovery_code) >= 12
         )
-        if not account:
+        if not accounts:
             if recovery_available:
                 session["password_reset"] = {
                     "user_id": user.id,
@@ -1261,9 +1265,20 @@ def forgot_password():
             )
             return render_template("forgot_password.html")
         code = f"{secrets.randbelow(1_000_000):06d}"
-        try:
-            send_password_reset_code(account, user.email, code)
-        except Exception:
+        delivery_error = None
+        for account in accounts:
+            try:
+                send_password_reset_code(account, user.email, code)
+                delivery_error = None
+                break
+            except Exception as exc:
+                app.logger.warning(
+                    "Password reset delivery failed via %s: %s",
+                    account.email,
+                    type(exc).__name__,
+                )
+                delivery_error = exc
+        if delivery_error is not None:
             if recovery_available:
                 session["password_reset"] = {
                     "user_id": user.id,

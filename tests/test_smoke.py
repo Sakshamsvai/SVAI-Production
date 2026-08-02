@@ -154,6 +154,48 @@ class SvaiSmokeTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 302)
 
+    def test_forgot_password_falls_back_to_another_linked_mailbox(self):
+        address = "reset-admin@yahoo.com"
+        with app.app_context():
+            db.session.add(User(
+                email=address,
+                password_hash=generate_password_hash("OldPassword123!"),
+                name="Reset Admin",
+            ))
+            db.session.add_all([
+                EmailAccount(
+                    email=address,
+                    encrypted_password=encrypt_password("abcdefghijklmnop"),
+                    provider="yahoo",
+                    active=True,
+                ),
+                EmailAccount(
+                    email="backup-sender@gmail.com",
+                    encrypted_password=encrypt_password("ponmlkjihgfedcba"),
+                    provider="gmail",
+                    active=True,
+                ),
+            ])
+            db.session.commit()
+
+        senders = []
+
+        def fail_then_send(account, recipient, code):
+            senders.append(account.email)
+            if account.email == address:
+                raise OSError("stale Yahoo app password")
+
+        with patch("server.send_password_reset_code", side_effect=fail_then_send):
+            response = self.client.post("/forgot-password", data={
+                "_csrf_token": self.csrf(),
+                "email": address,
+            })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/reset-password")
+        self.assertEqual(senders[0], address)
+        self.assertGreaterEqual(len(senders), 2)
+        self.assertNotEqual(senders[1], address)
+
     def test_forgot_password_uses_admin_recovery_when_smtp_is_unavailable(self):
         address = "recovery-admin@example.com"
         recovery_code = "SVAI-Recovery-4827"
