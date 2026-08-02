@@ -750,7 +750,7 @@ def existing_case_for_application(application_number, exclude_case=None, subject
 
 
 def existing_case_for_duplicate_assignment(details, account):
-    """Merge duplicate Fresh/Audit emails, but keep real subsequent/revisit work separate."""
+    """Merge same assignment arriving in Gmail and Yahoo; keep new work separate."""
     key = normalized_application_number(details.get("application_number", ""))
     if not key:
         return None
@@ -759,18 +759,64 @@ def existing_case_for_duplicate_assignment(details, account):
         return None
     candidates = ValuationCase.query.filter(
         ValuationCase.archived.is_(False),
-        ValuationCase.source_email == account.email,
     ).order_by(
-        db.func.coalesce(ValuationCase.email_received_at, ValuationCase.created_at).desc()
+        db.func.coalesce(ValuationCase.email_received_at, ValuationCase.created_at).asc(),
+        ValuationCase.id.asc(),
     ).all()
     return next(
         (
             item for item in candidates
             if normalized_application_number(item.application_number) == key
-            and (item.case_type or "").strip().casefold() == incoming_type
+            and (item.case_type or "").strip().casefold()
+            not in {"subsequent", "revisit", "part / tranche"}
         ),
         None,
     )
+
+
+def merge_cross_mailbox_duplicate_cases():
+    """Archive only exact non-follow-up duplicate assignments and retain their files."""
+    groups = {}
+    for case in ValuationCase.query.filter_by(archived=False).order_by(
+        db.func.coalesce(ValuationCase.email_received_at, ValuationCase.created_at).asc(),
+        ValuationCase.id.asc(),
+    ).all():
+        key = normalized_application_number(case.application_number)
+        kind = (case.case_type or "").strip().casefold()
+        if not key or kind in {"subsequent", "revisit", "part / tranche"}:
+            continue
+        groups.setdefault(key, []).append(case)
+    merged = 0
+    for cases in groups.values():
+        if len(cases) < 2:
+            continue
+        canonical = cases[0]
+        for duplicate in cases[1:]:
+            # Do not merge two genuinely different banks under an accidentally reused ID.
+            if (
+                canonical.bank_name and duplicate.bank_name
+                and normalized_header(canonical.bank_name) != normalized_header(duplicate.bank_name)
+            ):
+                continue
+            for field in ("customer_name", "contact_number", "property_address", "branch_name", "bank_name"):
+                if not (getattr(canonical, field, "") or "").strip() and (getattr(duplicate, field, "") or "").strip():
+                    setattr(canonical, field, getattr(duplicate, field))
+            for asset in FileAsset.query.filter_by(case_id=duplicate.id).all():
+                asset.case_id = canonical.id
+            stored = safe_json(canonical.extracted_json)
+            stored.setdefault("followup_emails", []).append({
+                "message_id": duplicate.source_message_id or f"duplicate-case-{duplicate.id}",
+                "subject": duplicate.email_subject or "Duplicate assignment from another mailbox",
+                "received_at": duplicate.email_received_at.isoformat() if duplicate.email_received_at else "",
+                "action": "Duplicate Gmail/Yahoo assignment merged into existing MIS case",
+            })
+            canonical.extracted_json = json.dumps(stored, ensure_ascii=False)
+            duplicate.archived = True
+            duplicate.status = f"Duplicate merged into Case #{canonical.id}"
+            merged += 1
+    if merged:
+        db.session.commit()
+    return merged
 
 
 def apply_followup_to_existing_case(
@@ -1048,8 +1094,10 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 created += 1
         account.last_fetch_at = datetime.utcnow()
         db.session.commit()
+        deduplicated = merge_cross_mailbox_duplicate_cases()
         return {
             "created": created, "updated": updated, "ignored": ignored,
+            "deduplicated": deduplicated,
             "message": f"Fetched {start_date:%d-%m-%Y} to {end_date:%d-%m-%Y}",
             "warning": warning,
         }
@@ -2695,7 +2743,8 @@ def fetch_one_email(account_id):
         result = fetch_email_account(account, date_from, date_to)
         flash(
             f"{result['created']} new, {result.get('updated', 0)} corrected valuation "
-            f"case(s); {result['ignored']} unrelated email(s) ignored."
+            f"case(s); {result.get('deduplicated', 0)} duplicate MIS row(s) merged; "
+            f"{result['ignored']} unrelated email(s) ignored."
             + (f" {result.get('warning')}" if result.get("warning") else ""),
             "error" if result.get("warning") else "success",
         )
@@ -2709,6 +2758,7 @@ def fetch_one_email(account_id):
 def fetch_all_emails():
     total = 0
     updated = 0
+    deduplicated = 0
     errors = []
     warnings = []
     ignored = 0
@@ -2720,6 +2770,7 @@ def fetch_all_emails():
             result = fetch_email_account(account, date_from, date_to)
             total += result["created"]
             updated += result.get("updated", 0)
+            deduplicated += result.get("deduplicated", 0)
             ignored += result["ignored"]
             if result.get("warning"):
                 warnings.append(f"{account.email}: {result['warning']}")
@@ -2727,6 +2778,7 @@ def fetch_all_emails():
             errors.append(f"{account.email}: {exc}")
     flash(
         f"{total} valuation case(s) added; {updated} existing case(s) corrected; "
+        f"{deduplicated} duplicate MIS row(s) merged; "
         f"{ignored} unrelated email(s) ignored. "
         f"Range: {date_from:%d-%m-%Y} to {date_to:%d-%m-%Y}."
         + (f" Warnings: {'; '.join(warnings)}" if warnings else "")

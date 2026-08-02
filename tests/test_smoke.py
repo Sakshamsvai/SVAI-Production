@@ -40,7 +40,7 @@ from server import (  # noqa: E402
     apply_followup_to_existing_case, db, encrypt_password, is_followup_email,
     existing_case_for_duplicate_assignment, normalized_application_number,
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
-    billing_column_map, generate_billing_workbook,
+    billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
 )
 
 
@@ -666,6 +666,30 @@ class SvaiSmokeTests(unittest.TestCase):
             self.assertIsNone(existing_case_for_duplicate_assignment({
                 "application_number": "GWA-PRO-003283", "case_type": "Subsequent",
             }, account))
+
+    def test_cross_mailbox_same_application_merges_to_one_active_mis_case(self):
+        with app.app_context():
+            gmail_case = ValuationCase(
+                application_number="SAME-CASE-101", customer_name="Customer One",
+                bank_name="Test Bank", case_type="Fresh", source_email="gmail@example.com",
+                source_message_id="<gmail-copy@example.com>",
+            )
+            yahoo_case = ValuationCase(
+                application_number="SAME CASE 101", contact_number="9999999999",
+                bank_name="Test Bank", case_type="Fresh", source_email="yahoo@example.com",
+                source_message_id="<yahoo-copy@example.com>",
+            )
+            subsequent = ValuationCase(
+                application_number="SAME-CASE-101", bank_name="Test Bank",
+                case_type="Subsequent", source_email="yahoo@example.com",
+            )
+            db.session.add_all([gmail_case, yahoo_case, subsequent])
+            db.session.commit()
+            self.assertEqual(merge_cross_mailbox_duplicate_cases(), 1)
+            self.assertFalse(gmail_case.archived)
+            self.assertTrue(yahoo_case.archived)
+            self.assertEqual(gmail_case.contact_number, "9999999999")
+            self.assertFalse(subsequent.archived)
 
     def test_followup_report_request_updates_existing_case_without_new_mis_row(self):
         with app.app_context():
