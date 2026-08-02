@@ -1047,6 +1047,22 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 raw = next((x[1] for x in msg_data if isinstance(x, tuple)), None)
                 if raw:
                     raw_messages.append((msg_id, raw))
+        # Gmail's normal IMAP date search can miss a bank message when Gmail
+        # has indexed it under a category/label.  Query the known LIFC sender
+        # through Gmail's own search syntax as a narrow fallback.
+        is_gmail = (account.provider or "").casefold() == "gmail" or account.email.casefold().endswith("@gmail.com")
+        if is_gmail and mail.select('"[Gmail]/All Mail"')[0] == "OK":
+            gmail_query = (
+                f"from:(lifl.in) after:{(start_date - timedelta(days=1)):%Y/%m/%d} "
+                f"before:{(end_date + timedelta(days=1)):%Y/%m/%d}"
+            )
+            status, payload = mail.search(None, "X-GM-RAW", f'"{gmail_query}"')
+            if status == "OK":
+                for msg_id in payload[0].split()[-100:]:
+                    status, msg_data = mail.fetch(msg_id, "(RFC822)")
+                    raw = next((x[1] for x in msg_data if isinstance(x, tuple)), None) if status == "OK" else None
+                    if raw:
+                        raw_messages.append((msg_id, raw))
         if not scanned_folders:
             return {"created": 0, "ignored": 0, "message": "Mailbox folder search failed"}
 
