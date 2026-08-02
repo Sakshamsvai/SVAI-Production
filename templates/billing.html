@@ -9,7 +9,7 @@
     <label>Saved Bill Format
       <select name="billing_template_id">
         <option value="">Select saved format</option>
-        {% for template in templates %}<option value="{{ template.id }}" {% if selected_template_id == template.id|string %}selected{% endif %}>{{ template.bank_name }}{% if template.branch_name %} — {{ template.branch_name }}{% endif %} — {{ template.filename }}</option>{% endfor %}
+        {% for template in templates %}<option value="{{ template.id }}" data-bank="{{ template.bank_name }}" data-branch="{{ template.branch_name or '' }}" {% if selected_template_id == template.id|string %}selected{% endif %}>{{ template.bank_name }}{% if template.branch_name %} — {{ template.branch_name }}{% endif %} — {{ template.filename }}</option>{% endfor %}
       </select>
     </label>
     <label>New / changed bank format (.xlsx only)<input type="file" name="billing_template" accept=".xlsx"></label>
@@ -22,8 +22,9 @@
     <label class="upload-source" hidden>Upload MIS (.xlsx)<input type="file" name="mis_file" accept=".xlsx"></label>
     <div class="full"><h3>KM-wise billing rates</h3><p class="note">Example: 0–30 KM = ₹1500, 30.01–50 KM = ₹1800. Last range ka maximum blank chhod sakte hain.</p>
       <div id="slabs" class="slab-grid">
+        {% for slab in saved_slabs %}<div class="slab-row"><label>Min KM<input type="number" step="0.01" min="0" name="slab_min[]" value="{{ slab[0] }}" required></label><label>Max KM<input type="number" step="0.01" min="0" name="slab_max[]" value="{{ slab[1] if slab[1] is not none else '' }}"></label><label>Amount ₹<input type="number" step="0.01" min="0" name="slab_amount[]" value="{{ slab[2] }}" required></label><button type="button" class="small secondary remove-slab">Remove</button></div>{% else %}
         <div class="slab-row"><label>Min KM<input type="number" step="0.01" min="0" name="slab_min[]" value="0" required></label><label>Max KM<input type="number" step="0.01" min="0" name="slab_max[]" value="30"></label><label>Amount ₹<input type="number" step="0.01" min="0" name="slab_amount[]" placeholder="1500" required></label><button type="button" class="small secondary remove-slab">Remove</button></div>
-        <div class="slab-row"><label>Min KM<input type="number" step="0.01" min="0" name="slab_min[]" value="30.01" required></label><label>Max KM<input type="number" step="0.01" min="0" name="slab_max[]" value="50"></label><label>Amount ₹<input type="number" step="0.01" min="0" name="slab_amount[]" placeholder="1800" required></label><button type="button" class="small secondary remove-slab">Remove</button></div>
+        <div class="slab-row"><label>Min KM<input type="number" step="0.01" min="0" name="slab_min[]" value="30.01" required></label><label>Max KM<input type="number" step="0.01" min="0" name="slab_max[]" value="50"></label><label>Amount ₹<input type="number" step="0.01" min="0" name="slab_amount[]" placeholder="1800" required></label><button type="button" class="small secondary remove-slab">Remove</button></div>{% endfor %}
       </div>
       <button type="button" class="small secondary" id="add-slab">+ Add KM Range</button>
     </div>
@@ -41,6 +42,8 @@
 const source = document.getElementById('billing-source');
 function toggleSource() { document.querySelectorAll('.live-source').forEach(x => x.hidden = source.value !== 'live'); document.querySelectorAll('.upload-source').forEach(x => x.hidden = source.value !== 'upload'); }
 source.addEventListener('change', toggleSource); toggleSource();
+const templateSelect = document.querySelector('[name="billing_template_id"]');
+templateSelect.addEventListener('change', () => { const option = templateSelect.options[templateSelect.selectedIndex]; if (!option.value) return; document.querySelector('[name="bank_name"]').value = option.dataset.bank || ''; document.querySelector('[name="branch_name"]').value = option.dataset.branch || ''; window.location = '{{ url_for("billing_page") }}?template_id=' + encodeURIComponent(option.value); });
 document.getElementById('add-slab').addEventListener('click', () => { document.getElementById('slabs').insertAdjacentHTML('beforeend', '<div class="slab-row"><label>Min KM<input type="number" step="0.01" min="0" name="slab_min[]" required></label><label>Max KM<input type="number" step="0.01" min="0" name="slab_max[]"></label><label>Amount ₹<input type="number" step="0.01" min="0" name="slab_amount[]" required></label><button type="button" class="small secondary remove-slab">Remove</button></div>'); });
 document.getElementById('slabs').addEventListener('click', e => { if (e.target.classList.contains('remove-slab') && document.querySelectorAll('.slab-row').length > 1) e.target.closest('.slab-row').remove(); });
 </script>

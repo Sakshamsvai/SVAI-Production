@@ -168,6 +168,23 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(result["B3"].value, "BILL-1")
         self.assertEqual(result["G3"].value, 1500)
 
+    def test_mis_km_save_is_available_to_billing(self):
+        with app.app_context():
+            case = ValuationCase(application_number="KM-1", customer_name="KM Case")
+            db.session.add(case)
+            db.session.commit()
+            case_id = case.id
+        self.login()
+        response = self.client.post(f"/cases/{case_id}/km", data={
+            "_csrf_token": self.csrf(), "distance_from_branch": "42.5",
+        })
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            case = db.session.get(ValuationCase, case_id)
+            self.assertEqual(
+                safe_json(case.extracted_json)["case_profile"]["distance_from_branch"], 42.5
+            )
+
     def test_forgot_password_resets_through_saved_linked_mailbox(self):
         address = "reset-user@example.com"
         with app.app_context():

@@ -169,6 +169,15 @@ class BillingTemplate(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
+class BillingRatePlan(db.Model):
+    """Reusable KM slabs; one current plan per bank and optional branch."""
+    id = db.Column(db.Integer, primary_key=True)
+    bank_name = db.Column(db.String(180), nullable=False, index=True)
+    branch_name = db.Column(db.String(180), default="")
+    slabs_json = db.Column(db.Text, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Valuation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     case_id = db.Column(db.Integer, db.ForeignKey("valuation_case.id"), unique=True, nullable=False)
@@ -425,6 +434,28 @@ def parse_billing_slabs(form):
     if not slabs:
         raise ValueError("Kam se kam ek KM slab amount zaroor add karein.")
     return sorted(slabs, key=lambda row: row[0])
+
+
+def saved_billing_slabs(bank_name, branch_name=""):
+    plan = BillingRatePlan.query.filter(
+        db.func.lower(BillingRatePlan.bank_name) == (bank_name or "").lower(),
+        db.func.lower(BillingRatePlan.branch_name) == (branch_name or "").lower(),
+    ).order_by(BillingRatePlan.updated_at.desc()).first()
+    if not plan:
+        return []
+    slabs = safe_json(plan.slabs_json, [])
+    return [tuple(item) for item in slabs if isinstance(item, list) and len(item) == 3]
+
+
+def save_billing_slabs(bank_name, branch_name, slabs):
+    plan = BillingRatePlan.query.filter(
+        db.func.lower(BillingRatePlan.bank_name) == (bank_name or "").lower(),
+        db.func.lower(BillingRatePlan.branch_name) == (branch_name or "").lower(),
+    ).first()
+    if plan is None:
+        plan = BillingRatePlan(bank_name=bank_name, branch_name=branch_name or "")
+    plan.slabs_json = json.dumps(slabs)
+    db.session.add(plan)
 
 
 def billing_case_rows(cases):
@@ -1336,7 +1367,11 @@ def protect_requests():
 
 @app.context_processor
 def template_security():
-    return {"csrf_token": session.get("_csrf_token", "")}
+    def case_km(case):
+        stored = safe_json(case.extracted_json)
+        profile = stored.get("case_profile") or stored.get("email") or stored
+        return profile.get("distance_from_branch", profile.get("km", ""))
+    return {"csrf_token": session.get("_csrf_token", ""), "case_km": case_km}
 
 
 @app.before_request
@@ -1788,6 +1823,27 @@ def update_case(case_id):
     db.session.commit()
     flash("Case details saved.", "success")
     return redirect(url_for("case_detail", case_id=case_id))
+
+
+@app.route("/cases/<int:case_id>/km", methods=["POST"])
+@login_required
+def update_case_km(case_id):
+    case = ValuationCase.query.get_or_404(case_id)
+    km = numeric_km(request.form.get("distance_from_branch", ""))
+    if km is None:
+        flash("Billing ke liye valid K.M. enter karein.", "error")
+    else:
+        stored = safe_json(case.extracted_json)
+        profile = dict(stored.get("case_profile") or stored.get("email") or stored)
+        profile["distance_from_branch"] = km
+        if "case_profile" in stored or "email" in stored:
+            stored["case_profile"] = profile
+        else:
+            stored = {"case_profile": profile}
+        case.extracted_json = json.dumps(stored, ensure_ascii=False, default=str)
+        db.session.commit()
+        flash(f"{km:g} K.M. MIS aur billing ke liye saved.", "success")
+    return redirect(request.referrer or url_for("dashboard"))
 
 
 @app.route("/cases/<int:case_id>/upload", methods=["POST"])
@@ -2373,7 +2429,13 @@ def billing_page():
                 raise ValueError("Bank ka saved invoice format select karein, ya naya format upload karein.")
             template = BillingTemplate.query.get_or_404(int(selected_id))
             bank_name = bank_name or template.bank_name
-            slabs = parse_billing_slabs(request.form)
+            branch_name = branch_name or template.branch_name or ""
+            submitted_slab_amounts = [value for value in request.form.getlist("slab_amount[]") if str(value).strip()]
+            slabs = parse_billing_slabs(request.form) if submitted_slab_amounts else saved_billing_slabs(bank_name, branch_name)
+            if not slabs:
+                raise ValueError("Is bank ke KM rates pehle Save Rates me set karein.")
+            save_billing_slabs(bank_name, branch_name, slabs)
+            db.session.commit()
             source = request.form.get("source", "live")
             if source == "upload":
                 mis_file = request.files.get("mis_file")
@@ -2413,9 +2475,14 @@ def billing_page():
         except Exception as exc:
             flash(f"Original invoice format fill nahi ho saka; koi generic bill nahi banaya gaya. {exc}", "error")
     selected_template_id = request.args.get("template_id", "")
+    selected_template = BillingTemplate.query.get(selected_template_id) if str(selected_template_id).isdigit() else None
+    saved_slabs = saved_billing_slabs(
+        selected_template.bank_name, selected_template.branch_name or ""
+    ) if selected_template else []
     return render_template(
         "billing.html", templates=saved_templates, default_from=default_from,
         default_to=default_to, selected_template_id=str(selected_template_id),
+        saved_slabs=saved_slabs,
     )
 
 
