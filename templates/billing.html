@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}SVAI Billing{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-head"><div><h1>Bank Billing</h1><p>Original bank invoice format me selected MIS cases aur KM slabs se bill banayein.</p></div></div>
+  <form method="post" enctype="multipart/form-data" class="form-grid three" id="billing-form">
+    <label>Bank Name<input name="bank_name" placeholder="e.g. Laxmi India Finance"></label>
+    <label>Branch (optional)<input name="branch_name" placeholder="e.g. Gwalior"></label>
+    <label>Saved Bill Format
+      <select name="billing_template_id">
+        <option value="">Select saved format</option>
+        {% for template in templates %}<option value="{{ template.id }}" {% if selected_template_id == template.id|string %}selected{% endif %}>{{ template.bank_name }}{% if template.branch_name %} — {{ template.branch_name }}{% endif %} — {{ template.filename }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>New / changed bank format (.xlsx only)<input type="file" name="billing_template" accept=".xlsx"></label>
+    <div class="full note">Naya format upload karne par pehle safely save hoga. Phir us format ko select karke bill generate karein. Isse badalte bank format future me bhi reuse honge.</div>
+    <label>Source
+      <select name="source" id="billing-source"><option value="live">Live MIS (date range)</option><option value="upload">Upload MIS Excel</option></select>
+    </label>
+    <label class="live-source">MIS From<input type="date" name="from" value="{{ default_from.isoformat() }}"></label>
+    <label class="live-source">MIS To<input type="date" name="to" value="{{ default_to.isoformat() }}"></label>
+    <label class="upload-source" hidden>Upload MIS (.xlsx)<input type="file" name="mis_file" accept=".xlsx"></label>
+    <div class="full"><h3>KM-wise billing rates</h3><p class="note">Example: 0–30 KM = ₹1500, 30.01–50 KM = ₹1800. Last range ka maximum blank chhod sakte hain.</p>
+      <div id="slabs" class="slab-grid">
+        <div class="slab-row"><label>Min KM<input type="number" step="0.01" min="0" name="slab_min[]" value="0" required></label><label>Max KM<input type="number" step="0.01" min="0" name="slab_max[]" value="30"></label><label>Amount ₹<input type="number" step="0.01" min="0" name="slab_amount[]" placeholder="1500" required></label><button type="button" class="small secondary remove-slab">Remove</button></div>
+        <div class="slab-row"><label>Min KM<input type="number" step="0.01" min="0" name="slab_min[]" value="30.01" required></label><label>Max KM<input type="number" step="0.01" min="0" name="slab_max[]" value="50"></label><label>Amount ₹<input type="number" step="0.01" min="0" name="slab_amount[]" placeholder="1800" required></label><button type="button" class="small secondary remove-slab">Remove</button></div>
+      </div>
+      <button type="button" class="small secondary" id="add-slab">+ Add KM Range</button>
+    </div>
+    <div class="full"><button class="green">Generate Bank Bill</button></div>
+  </form>
+</section>
+<section class="card">
+  <h2>Saved bank bill formats</h2>
+  <div class="table-wrap"><table><thead><tr><th>Bank</th><th>Branch</th><th>Original file</th><th>Saved</th><th></th></tr></thead><tbody>
+    {% for template in templates %}<tr><td>{{ template.bank_name }}</td><td>{{ template.branch_name or '—' }}</td><td>{{ template.filename }}</td><td>{{ template.created_at }}</td><td><form method="post" action="{{ url_for('delete_billing_template', template_id=template.id) }}"><button class="small danger" data-confirm="Delete this saved billing format?">Delete</button></form></td></tr>
+    {% else %}<tr><td colspan="5" class="empty">No billing format saved yet. Upload one original bank invoice format above.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+<script>
+const source = document.getElementById('billing-source');
+function toggleSource() { document.querySelectorAll('.live-source').forEach(x => x.hidden = source.value !== 'live'); document.querySelectorAll('.upload-source').forEach(x => x.hidden = source.value !== 'upload'); }
+source.addEventListener('change', toggleSource); toggleSource();
+document.getElementById('add-slab').addEventListener('click', () => { document.getElementById('slabs').insertAdjacentHTML('beforeend', '<div class="slab-row"><label>Min KM<input type="number" step="0.01" min="0" name="slab_min[]" required></label><label>Max KM<input type="number" step="0.01" min="0" name="slab_max[]"></label><label>Amount ₹<input type="number" step="0.01" min="0" name="slab_amount[]" required></label><button type="button" class="small secondary remove-slab">Remove</button></div>'); });
+document.getElementById('slabs').addEventListener('click', e => { if (e.target.classList.contains('remove-slab') && document.querySelectorAll('.slab-row').length > 1) e.target.closest('.slab-row').remove(); });
+</script>
+{% endblock %}

@@ -158,6 +158,17 @@ class FileAsset(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
+class BillingTemplate(db.Model):
+    """A bank's original invoice workbook plus its reusable billing identity."""
+    id = db.Column(db.Integer, primary_key=True)
+    bank_name = db.Column(db.String(180), nullable=False, index=True)
+    branch_name = db.Column(db.String(180))
+    filename = db.Column(db.String(255), nullable=False)
+    mime_type = db.Column(db.String(120))
+    content = db.Column(db.LargeBinary, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 class Valuation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     case_id = db.Column(db.Integer, db.ForeignKey("valuation_case.id"), unique=True, nullable=False)
@@ -375,6 +386,180 @@ def parse_iso_date(value, default):
 def current_month_range():
     today = datetime.now(APP_TIMEZONE).date()
     return today.replace(day=1), today
+
+
+def normalized_header(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def numeric_km(value):
+    match = re.search(r"\d+(?:\.\d+)?", str(value or ""))
+    return float(match.group()) if match else None
+
+
+def billing_fee_for_km(km, slabs):
+    if km is None:
+        return None
+    for minimum, maximum, amount in slabs:
+        if km >= minimum and (maximum is None or km <= maximum):
+            return amount
+    return None
+
+
+def parse_billing_slabs(form):
+    slabs = []
+    for minimum, maximum, amount in zip(
+        form.getlist("slab_min[]"), form.getlist("slab_max[]"), form.getlist("slab_amount[]")
+    ):
+        if not any((minimum, maximum, amount)):
+            continue
+        try:
+            parsed_minimum = float(minimum or 0)
+            parsed_maximum = float(maximum) if str(maximum).strip() else None
+            parsed_amount = float(amount)
+        except ValueError:
+            raise ValueError("Har KM slab me valid minimum aur amount enter karein.")
+        if parsed_minimum < 0 or parsed_amount < 0 or (parsed_maximum is not None and parsed_maximum < parsed_minimum):
+            raise ValueError("KM slab range valid nahi hai.")
+        slabs.append((parsed_minimum, parsed_maximum, parsed_amount))
+    if not slabs:
+        raise ValueError("Kam se kam ek KM slab amount zaroor add karein.")
+    return sorted(slabs, key=lambda row: row[0])
+
+
+def billing_case_rows(cases):
+    rows = []
+    for case in cases:
+        profile = safe_json(case.extracted_json)
+        profile = profile.get("case_profile") or profile.get("email") or profile
+        rows.append({
+            "application_number": case.application_number or "",
+            "customer_name": case.customer_name or "",
+            "property_address": case.property_address or "",
+            "case_type": case.case_type or "",
+            "bank_name": case.bank_name or "",
+            "branch_name": case.branch_name or "",
+            "distance": numeric_km(profile.get("distance_from_branch", profile.get("km", ""))),
+        })
+    return rows
+
+
+def billing_upload_rows(upload):
+    """Read a standard MIS export. It is input only; the original invoice stays untouched."""
+    try:
+        workbook = load_workbook(io.BytesIO(upload.read()), data_only=True, read_only=True)
+    except Exception as exc:
+        raise ValueError(f"MIS Excel read nahi hua: {exc}")
+    sheet = workbook.active
+    header_row = None
+    columns = {}
+    aliases = {
+        "application_number": {"applicationno", "applicationnumber", "leadidno", "idno", "leadproposalno", "leadpurposalno"},
+        "customer_name": {"customername", "applicantname", "name"},
+        "property_address": {"address", "propertyaddress"},
+        "case_type": {"casetype", "product", "productname"},
+        "bank_name": {"bank", "bankname"},
+        "branch_name": {"branch", "branchname"},
+        "distance": {"km", "distance", "distence", "distancefrombranchinkm", "distencefrombranchinkm", "distancekm"},
+    }
+    for row_number, row in enumerate(sheet.iter_rows(values_only=True), 1):
+        found = {normalized_header(value): index for index, value in enumerate(row) if value is not None}
+        if any(key in found for key in aliases["application_number"]) and any(
+            key in found for key in aliases["customer_name"]
+        ):
+            header_row = row_number
+            for field, names in aliases.items():
+                for name in names:
+                    if name in found:
+                        columns[field] = found[name]
+                        break
+            break
+    if not header_row:
+        raise ValueError("Uploaded MIS me Application No aur Customer Name heading nahi mili.")
+    rows = []
+    for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
+        application = row[columns.get("application_number", -1)] if columns.get("application_number") is not None else ""
+        customer = row[columns.get("customer_name", -1)] if columns.get("customer_name") is not None else ""
+        if not application and not customer:
+            continue
+        rows.append({
+            field: (row[index] if index is not None and index < len(row) else "")
+            for field, index in columns.items()
+        })
+        rows[-1]["distance"] = numeric_km(rows[-1].get("distance"))
+    return rows
+
+
+def billing_column_map(sheet):
+    aliases = {
+        "serial": {"sno", "srno", "serialno"},
+        "application": {"applicationno", "applicationnumber", "leadidno", "idno", "leadproposalno", "leadpurposalno"},
+        "customer": {"customername", "applicantname", "customer"},
+        "product": {"product", "productname", "casetype"},
+        "address": {"propertyaddress", "address"},
+        "distance": {"distance", "distence", "distancekm", "distancefrombranchinkm", "distencefrombranchinkm", "km"},
+        "fee": {"fee", "fees", "amount", "valuationlegalamount"},
+    }
+    for row_number in range(1, min(sheet.max_row, 100) + 1):
+        found = {normalized_header(sheet.cell(row_number, col).value): col for col in range(1, sheet.max_column + 1)}
+        mapping = {}
+        for field, names in aliases.items():
+            for name in names:
+                if name in found:
+                    mapping[field] = found[name]
+                    break
+        if "application" in mapping and "customer" in mapping and ("fee" in mapping or "distance" in mapping):
+            return row_number, mapping
+    raise ValueError("Invoice template me Application/Customer/Fee wali detail heading auto-detect nahi hui. Bank ka line-item invoice format upload karein.")
+
+
+def generate_billing_workbook(template_content, rows, slabs):
+    """Fill an uploaded bank invoice workbook without rebuilding its layout or formulas."""
+    source = io.BytesIO(template_content)
+    workbook = load_workbook(source, keep_vba=False)
+    sheet = workbook.active
+    header_row, columns = billing_column_map(sheet)
+    start_row = header_row + 1
+    # Never overwrite a total / tax / grand-total section. Clear only existing detail rows.
+    end_row = start_row
+    while end_row <= sheet.max_row:
+        label = " ".join(str(sheet.cell(end_row, col).value or "") for col in range(1, min(sheet.max_column, 4) + 1)).lower()
+        if any(word in label for word in ("total", "cgst", "sgst", "grand", "tax")):
+            break
+        if end_row - start_row > 500:
+            break
+        for col in range(1, sheet.max_column + 1):
+            if sheet.cell(end_row, col).data_type != "f":
+                sheet.cell(end_row, col).value = None
+        end_row += 1
+    for index, row in enumerate(rows, start=1):
+        excel_row = start_row + index - 1
+        if excel_row >= end_row:
+            sheet.insert_rows(excel_row)
+            # Copy blank-row formatting from the first detail row.
+            for col in range(1, sheet.max_column + 1):
+                source_cell = sheet.cell(start_row, col)
+                target = sheet.cell(excel_row, col)
+                if source_cell.has_style:
+                    target._style = source_cell._style
+                if source_cell.number_format:
+                    target.number_format = source_cell.number_format
+        fee = billing_fee_for_km(row.get("distance"), slabs)
+        values = {
+            "serial": index,
+            "application": row.get("application_number", ""),
+            "customer": row.get("customer_name", ""),
+            "product": row.get("case_type", ""),
+            "address": row.get("property_address", ""),
+            "distance": row.get("distance", ""),
+            "fee": fee if fee is not None else "",
+        }
+        for field, value in values.items():
+            if field in columns:
+                sheet.cell(excel_row, columns[field]).value = value
+    stream = io.BytesIO()
+    workbook.save(stream)
+    return stream.getvalue(), [row for row in rows if billing_fee_for_km(row.get("distance"), slabs) is None]
 
 
 def collect_email_attachments(message):
@@ -2152,6 +2337,96 @@ def delete_template(asset_id):
     db.session.delete(asset)
     db.session.commit()
     return redirect(url_for("templates_page"))
+
+
+@app.route("/billing", methods=["GET", "POST"])
+@login_required
+def billing_page():
+    default_from, default_to = current_month_range()
+    saved_templates = BillingTemplate.query.order_by(
+        BillingTemplate.bank_name, BillingTemplate.created_at.desc()
+    ).all()
+    if request.method == "POST":
+        bank_name = request.form.get("bank_name", "").strip()
+        branch_name = request.form.get("branch_name", "").strip()
+        new_template = request.files.get("billing_template")
+        selected_id = request.form.get("billing_template_id", "").strip()
+        try:
+            if new_template and new_template.filename:
+                suffix = Path(new_template.filename).suffix.lower()
+                if suffix not in {".xlsx"}:
+                    raise ValueError("Billing format ke liye .xlsx Excel file upload karein.")
+                if not bank_name:
+                    raise ValueError("Naya format save karne ke liye Bank Name zaroori hai.")
+                template = BillingTemplate(
+                    bank_name=bank_name,
+                    branch_name=branch_name,
+                    filename=secure_filename(new_template.filename),
+                    mime_type=new_template.mimetype,
+                    content=new_template.read(),
+                )
+                db.session.add(template)
+                db.session.commit()
+                flash("Original bank billing format safely saved. Ab isi format se bill banega.", "success")
+                return redirect(url_for("billing_page", template_id=template.id))
+            if not selected_id:
+                raise ValueError("Bank ka saved invoice format select karein, ya naya format upload karein.")
+            template = BillingTemplate.query.get_or_404(int(selected_id))
+            bank_name = bank_name or template.bank_name
+            slabs = parse_billing_slabs(request.form)
+            source = request.form.get("source", "live")
+            if source == "upload":
+                mis_file = request.files.get("mis_file")
+                if not mis_file or not mis_file.filename:
+                    raise ValueError("Upload MIS option ke liye MIS .xlsx file select karein.")
+                rows = billing_upload_rows(mis_file)
+            else:
+                from_date = parse_iso_date(request.form.get("from"), default_from)
+                to_date = parse_iso_date(request.form.get("to"), default_to)
+                cases = filter_cases_by_dates(ValuationCase.query, from_date, to_date).order_by(
+                    db.func.coalesce(ValuationCase.email_received_at, ValuationCase.created_at)
+                ).all()
+                rows = billing_case_rows(cases)
+            selected_bank = normalized_header(bank_name)
+            if selected_bank:
+                rows = [row for row in rows if normalized_header(row.get("bank_name")) == selected_bank]
+            selected_branch = normalized_header(branch_name or template.branch_name)
+            if selected_branch:
+                rows = [row for row in rows if normalized_header(row.get("branch_name")) == selected_branch]
+            if not rows:
+                raise ValueError("Is bank/range ke liye koi MIS case nahi mila. Bank name ya date range check karein.")
+            output, pending_rows = generate_billing_workbook(template.content, rows, slabs)
+            if pending_rows:
+                flash(
+                    f"{len(pending_rows)} case(s) me KM/rate slab match nahi hua; unki Fee blank rakhi gayi hai. "
+                    "MIS me K.M fill karke phir bill generate karein.", "error"
+                )
+            filename = secure_filename(
+                f"{template.bank_name}_Invoice_{datetime.now(APP_TIMEZONE):%Y%m%d_%H%M}.xlsx"
+            )
+            return send_file(
+                io.BytesIO(output), as_attachment=True, download_name=filename,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except (ValueError, TypeError) as exc:
+            flash(str(exc), "error")
+        except Exception as exc:
+            flash(f"Original invoice format fill nahi ho saka; koi generic bill nahi banaya gaya. {exc}", "error")
+    selected_template_id = request.args.get("template_id", "")
+    return render_template(
+        "billing.html", templates=saved_templates, default_from=default_from,
+        default_to=default_to, selected_template_id=str(selected_template_id),
+    )
+
+
+@app.route("/billing/templates/<int:template_id>/delete", methods=["POST"])
+@login_required
+def delete_billing_template(template_id):
+    template = BillingTemplate.query.get_or_404(template_id)
+    db.session.delete(template)
+    db.session.commit()
+    flash("Billing format removed.", "success")
+    return redirect(url_for("billing_page"))
 
 
 @app.route("/cases/<int:case_id>/report", methods=["POST"])

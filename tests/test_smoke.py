@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import tempfile
@@ -35,10 +36,11 @@ from ai_service_openai import (  # noqa: E402
 )
 from report_service import fill_docx_template, fill_excel_template  # noqa: E402
 from server import (  # noqa: E402
-    EmailAccount, FileAsset, User, ValuationCase, app, apply_email_details,
+    BillingTemplate, EmailAccount, FileAsset, User, ValuationCase, app, apply_email_details,
     apply_followup_to_existing_case, db, encrypt_password, is_followup_email,
     existing_case_for_duplicate_assignment, normalized_application_number,
-    safe_json, valuation_defaults_from_profile,
+    safe_json, valuation_defaults_from_profile, billing_fee_for_km,
+    billing_column_map, generate_billing_workbook,
 )
 
 
@@ -95,7 +97,7 @@ class SvaiSmokeTests(unittest.TestCase):
 
     def test_primary_pages_render(self):
         self.login()
-        for path in ["/", "/email-accounts", "/templates", "/settings"]:
+        for path in ["/", "/email-accounts", "/templates", "/billing", "/settings"]:
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, path)
             self.assertIn(b"Dashboard / MIS", response.data)
@@ -106,6 +108,65 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Dashboard / MIS", response.data)
         self.assertIn(b"Process All Files", response.data)
+
+    def test_billing_fills_existing_invoice_table_with_km_slab_amount(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet["A1"] = "Original bank invoice header"
+        for column, header in enumerate((
+            "S.No.", "Lead ID No.", "Product Name", "Customer Name",
+            "Property Address", "Distance (K.M)", "Fee",
+        ), 1):
+            sheet.cell(5, column).value = header
+        sheet["G8"] = "Total"
+        source = io.BytesIO()
+        workbook.save(source)
+        result, unmatched = generate_billing_workbook(source.getvalue(), [{
+            "application_number": "APP-1", "customer_name": "Asha",
+            "case_type": "LAP", "property_address": "Gwalior", "distance": 35,
+        }], [(0, 30, 1500), (30.01, 50, 1800)])
+        filled = load_workbook(io.BytesIO(result)).active
+        self.assertEqual(filled["A6"].value, 1)
+        self.assertEqual(filled["B6"].value, "APP-1")
+        self.assertEqual(filled["G6"].value, 1800)
+        self.assertEqual(unmatched, [])
+        self.assertEqual(billing_fee_for_km(None, [(0, 30, 1500)]), None)
+
+    def test_billing_page_generates_from_live_mis_and_saved_bank_format(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        for column, header in enumerate((
+            "S.No.", "Lead ID No.", "Product Name", "Customer Name",
+            "Property Address", "Distance (K.M)", "Fee",
+        ), 1):
+            sheet.cell(2, column).value = header
+        sheet["G5"] = "Total"
+        source = io.BytesIO()
+        workbook.save(source)
+        with app.app_context():
+            template = BillingTemplate(
+                bank_name="Test Bank", filename="test-bank.xlsx",
+                content=source.getvalue(), mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            case = ValuationCase(
+                application_number="BILL-1", customer_name="Billing Customer",
+                bank_name="Test Bank", case_type="LAP", property_address="Gwalior",
+                extracted_json=json.dumps({"case_profile": {"distance_from_branch": "25"}}),
+            )
+            db.session.add_all([template, case])
+            db.session.commit()
+            template_id = template.id
+        self.login()
+        response = self.client.post("/billing", data={
+            "_csrf_token": self.csrf(), "bank_name": "Test Bank",
+            "billing_template_id": str(template_id), "source": "live",
+            "from": "2026-01-01", "to": "2027-01-01",
+            "slab_min[]": "0", "slab_max[]": "30", "slab_amount[]": "1500",
+        })
+        self.assertEqual(response.status_code, 200)
+        result = load_workbook(io.BytesIO(response.data)).active
+        self.assertEqual(result["B3"].value, "BILL-1")
+        self.assertEqual(result["G3"].value, 1500)
 
     def test_forgot_password_resets_through_saved_linked_mailbox(self):
         address = "reset-user@example.com"
