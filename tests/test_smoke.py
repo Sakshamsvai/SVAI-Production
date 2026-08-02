@@ -71,6 +71,27 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers["Location"], "/")
 
+    def test_configured_admin_password_repairs_stale_persistent_hash(self):
+        address = "render-admin@example.com"
+        configured_password = "ConfiguredPassword123!"
+        with patch.dict(os.environ, {
+            "ADMIN_EMAIL": address,
+            "ADMIN_PASSWORD": configured_password,
+        }):
+            self.client.get("/login")
+            with app.app_context():
+                user = User.query.filter_by(email=address).first()
+                self.assertIsNotNone(user)
+                user.password_hash = generate_password_hash("StalePassword123!")
+                db.session.commit()
+            response = self.client.post("/login", data={
+                "_csrf_token": self.csrf(),
+                "email": address,
+                "password": configured_password,
+            })
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers["Location"], "/")
+
     def test_primary_pages_render(self):
         self.login()
         for path in ["/", "/email-accounts", "/templates", "/settings"]:
@@ -221,6 +242,45 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn("Plot 12", profile["property_address_as_per_docs"])
         self.assertIn("151/2", profile["survey_khasra_plot_no_as_per_docs"])
         self.assertIn("151/3", profile["survey_khasra_plot_no_as_per_site"])
+
+    def test_flattened_technical_report_recovers_docs_site_boundaries_and_areas(self):
+        text = """
+        PROPERTY ADDRESS
+        Plot no.- 50, Part of Survey no. 62/1, Vill- Katsara, Dist- Vidisha MP 464001
+        Part of Survey no. 62/1, Vill- Katsara, Dist- Vidisha MP 464001
+        Total Permissible Built up area of Land in sqft. 867.00
+        Total Built up area of Land in sqft. 867.00
+        As Per Document Road H/O Prem narayan Ahirwar H/O Rajaram H/o Narmadaprashad
+        Actual Road H/O Prem narayan Ahirwar 6' Gali Then H/O Rajaram H/o Narmadaprashad
+        The plot area as per docs is 1162.00 sqft. And actual area at site 1042.00 sqft
+        Plot demarcated at site Yes
+        Occupied Status Self
+        Nature of Construction Load Bearing
+        No. Of Floors (Permissible & Actual) 2
+        14
+        46
+        100%
+        16-06-2026
+        """
+        docs = extract_property_asset(
+            "TECHNICAL_REPORT.PDF", b"", text, "property_document"
+        )
+        site = extract_property_asset(
+            "TECHNICAL_REPORT.PDF", b"", text, "visit_data"
+        )
+        self.assertEqual(docs["land_area_as_per_docs"], "1162.00 Sqft.")
+        self.assertEqual(site["land_area_as_per_site"], "1042.00 Sqft.")
+        self.assertEqual(docs["east_boundary_as_per_docs"], "Road")
+        self.assertEqual(docs["north_boundary_as_per_docs"], "H/O Rajaram")
+        self.assertEqual(site["north_boundary_as_per_site"], "6' Gali Then H/O Rajaram")
+        self.assertEqual(site["south_boundary_as_per_site"], "H/o Narmadaprashad")
+        self.assertEqual(docs["builtup_area_as_per_docs"], "867.00 Sqft.")
+        self.assertEqual(site["builtup_area_as_per_site"], "867.00 Sqft.")
+        self.assertEqual(site["plot_demarcated"], "Yes")
+        self.assertEqual(site["occupancy"], "Self Occupied")
+        self.assertEqual(site["property_age_years"], "14")
+        self.assertEqual(site["residual_age_years"], "46")
+        self.assertEqual(site["visit_date"], "16-06-2026")
 
     def test_existing_mis_row_is_stable_when_same_case_is_fetched_again(self):
         with app.app_context():
@@ -769,7 +829,7 @@ class SvaiSmokeTests(unittest.TestCase):
         laxmi = load_workbook(io.BytesIO(laxmi_output), data_only=False)["MOTA RAM"]
         self.assertEqual(laxmi["C15"].value, "Document Address")
         self.assertEqual(laxmi["C16"].value, "Actual Site Address")
-        self.assertEqual(laxmi["G38"].value, 1500)
+        self.assertEqual(laxmi["G38"].value, 1488)
         self.assertEqual(laxmi["D102"].value, "=G42")
         self.assertEqual(laxmi["I102"].value, "=D102*E102")
         self.assertEqual(len(laxmi._images), 1)

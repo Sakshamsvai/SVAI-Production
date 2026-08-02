@@ -622,9 +622,10 @@ def store_email_attachments(case, attachments):
         key = (attachment["filename"].casefold(), len(attachment["content"]))
         if key in existing:
             continue
+        asset_type, source_kind = quick_asset_type(attachment["filename"])
         store_asset(
-            case.id, "document", attachment["filename"], attachment["content"],
-            attachment["mime_type"], source_kind="property_document",
+            case.id, asset_type, attachment["filename"], attachment["content"],
+            attachment["mime_type"], source_kind=source_kind,
             process_ai=False,
         )
         existing.add(key)
@@ -1178,8 +1179,30 @@ def health():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        user = User.query.filter_by(email=request.form.get("email", "").strip().lower()).first()
-        if user and check_password_hash(user.password_hash, request.form.get("password", "")):
+        submitted_email = request.form.get("email", "").strip().lower()
+        submitted_password = request.form.get("password", "")
+        user = User.query.filter_by(email=submitted_email).first()
+        authenticated = bool(
+            user and check_password_hash(user.password_hash, submitted_password)
+        )
+        configured_admin_email = os.getenv(
+            "ADMIN_EMAIL", "sakshamvaluer@yahoo.com"
+        ).strip().lower()
+        configured_admin_password = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
+        if (
+            user
+            and not authenticated
+            and submitted_email == configured_admin_email
+            and configured_admin_password
+            and secrets.compare_digest(submitted_password, configured_admin_password)
+        ):
+            # Persistent databases can retain an older password hash after the
+            # Render ADMIN_PASSWORD secret is changed. Treat the configured
+            # secret as the recovery authority and repair the stored hash.
+            user.password_hash = generate_password_hash(configured_admin_password)
+            db.session.commit()
+            authenticated = True
+        if authenticated:
             session.clear()
             session["_csrf_token"] = secrets.token_urlsafe(32)
             session["user_id"] = user.id
@@ -1753,6 +1776,52 @@ def valuation_as_dict(valuation):
     return {field: getattr(valuation, field) for field in fields}
 
 
+def embedded_pdf_photos(asset):
+    """Return the largest real image from each uploaded PDF page.
+
+    Visit PDFs commonly contain one full-page site photograph plus a tiny
+    scanner watermark. Property-document PDFs use the same structure. Keeping
+    only the largest image prevents logos/watermarks from entering reports.
+    """
+    if Path(asset.filename).suffix.lower() != ".pdf":
+        return []
+    if asset.asset_type not in {"document", "visit_data"}:
+        return []
+    name = Path(asset.filename).stem.casefold()
+    is_property_document = any(token in name for token in (
+        "property_paper", "property paper", "registry", "sale_deed", "sale deed",
+    ))
+    is_visit_source = asset.asset_type == "visit_data" or any(
+        token in name for token in ("visit", "inspection", "site_data", "site data")
+    )
+    if not (is_property_document or is_visit_source):
+        return []
+    output = []
+    try:
+        reader = PdfReader(io.BytesIO(asset.content))
+        for page_index, page in enumerate(reader.pages):
+            images = list(page.images)
+            if not images:
+                continue
+            largest = max(images, key=lambda item: len(item.data or b""))
+            if len(largest.data or b"") < 10_000:
+                continue
+            if is_property_document:
+                category = "Property Document"
+            elif page_index == 0:
+                category = "Front Elevation"
+            else:
+                category = "Other Site Photo"
+            output.append({
+                "filename": f"{Path(asset.filename).stem}_page_{page_index + 1}_{largest.name}",
+                "category": category,
+                "content": largest.data,
+            })
+    except Exception:
+        return []
+    return output
+
+
 @app.route("/cases/<int:case_id>/process-ai", methods=["POST"])
 @login_required
 def process_case_ai(case_id):
@@ -1763,6 +1832,9 @@ def process_case_ai(case_id):
     visit_extractions = []
     processed = 0
     for asset in assets:
+        inferred_type, inferred_source = quick_asset_type(asset.filename)
+        if asset.asset_type == "document" and inferred_type == "visit_data":
+            asset.asset_type = "visit_data"
         if asset.asset_type == "photo":
             result = classify_property_photo(asset.filename, asset.content)
             category = result.get("category", "Other Site Photo")
@@ -1770,7 +1842,9 @@ def process_case_ai(case_id):
             asset.extraction_json = json.dumps(result, ensure_ascii=False)
             processed += 1
         elif asset.asset_type in {"document", "visit_data"}:
-            source_kind = "visit_data" if asset.asset_type == "visit_data" else "property_document"
+            source_kind = (
+                "visit_data" if asset.asset_type == "visit_data" else inferred_source
+            )
             asset.extracted_text = asset.extracted_text or extract_basic_text(asset.filename, asset.content)
             extraction = ai_extract_document(
                 asset.filename, asset.content, asset.extracted_text or "", source_kind
@@ -1786,6 +1860,12 @@ def process_case_ai(case_id):
             continue
         if asset.asset_type == "document":
             document_extractions.append(extraction)
+            if any(token in Path(asset.filename).stem.casefold() for token in (
+                "technical_report", "technical report", "valuation_report", "valuation report",
+            )):
+                visit_extractions.append(extract_property_asset(
+                    asset.filename, asset.content, asset.extracted_text or "", "visit_data"
+                ))
         elif asset.asset_type == "visit_data":
             visit_extractions.append(extraction)
     current = safe_json(case.extracted_json)
@@ -2059,6 +2139,8 @@ def generate_report(case_id):
         }
         for asset in assets if asset.asset_type == "photo"
     ]
+    for asset in assets:
+        photo_assets.extend(embedded_pdf_photos(asset))
     visit_images = [
         asset for asset in assets
         if (

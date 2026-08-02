@@ -101,7 +101,7 @@ KNOWN_CELL_MAPPINGS = {
         "I14": ("branch_name",),
         "C15": ("property_address_as_per_docs", "property_address"),
         "C16": ("property_address_as_per_site",),
-        "G38": ("land_area_as_per_docs", "land_area"),
+        "G38": ("land_area_as_per_site", "land_area"),
         "G42": ("builtup_area_as_per_site", "builtup_area"),
         "G44": ("property_usage_as_per_site",),
         "G47": ("property_age_years", "age_years"),

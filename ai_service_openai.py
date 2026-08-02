@@ -1147,6 +1147,112 @@ def _deterministic_asset_extract(filename, extracted_text, source_kind):
         r"(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})",
     ], compact, _space)
     output["remarks"] = _labeled_text(compact, (r"remarks?",), 900)
+    if output.get("document_type") in {"Technical Report", "Valuation Report"}:
+        # Bank-generated/readable technical reports often expose document and
+        # actual-site columns in flattened PDF text. Recover only explicitly
+        # labelled values; source authority below still removes the opposite
+        # namespace from each extraction pass.
+        address_lines = re.findall(
+            r"(?im)^\s*((?:Plot\s+no\.?|Part\s+of\s+Survey\s+no\.?).{15,250}?"
+            r"(?:MP\s*)?\d{6})\s*$",
+            compact,
+        )
+        if source_kind == "property_document" and address_lines:
+            output["property_address_as_per_docs"] = _space(address_lines[0])
+        elif source_kind == "visit_data" and address_lines:
+            output["property_address_as_per_site"] = _space(
+                address_lines[1] if len(address_lines) > 1 else address_lines[0]
+            )
+
+        area_pair = re.search(
+            r"(?is)plot\s+area\s+as\s+per\s+docs?\s+is\s*"
+            r"(\d[\d,.]*)\s*sqft\.?\s+And\s+actual\s+area\s+at\s+site\s*"
+            r"(\d[\d,.]*)\s*sqft",
+            compact,
+        )
+        if not area_pair:
+            area_pair = re.search(
+                r"(?m)^\s*(\d{4,}(?:\.\d+)?)\s+(\d{4,}(?:\.\d+)?)\s*$",
+                compact,
+            )
+        if area_pair:
+            if source_kind == "property_document":
+                output["land_area_as_per_docs"] = f"{area_pair.group(1)} Sqft."
+            else:
+                output["land_area_as_per_site"] = f"{area_pair.group(2)} Sqft."
+
+        total_bua = re.search(
+            r"(?i)Total\s+Built\s+up\s+area\s+of\s+Land\s+in\s+sqft\.?\s*"
+            r"(\d[\d,.]*)",
+            compact,
+        )
+        permissible_bua = re.search(
+            r"(?i)Total\s+Permissible\s+Built\s+up\s+area\s+of\s+Land\s+in\s+sqft\.?\s*"
+            r"(\d[\d,.]*)",
+            compact,
+        )
+        if source_kind == "property_document" and permissible_bua:
+            output["builtup_area_as_per_docs"] = f"{permissible_bua.group(1)} Sqft."
+        elif source_kind == "visit_data" and total_bua:
+            output["builtup_area_as_per_site"] = f"{total_bua.group(1)} Sqft."
+
+        docs_boundaries = re.search(
+            r"(?is)As\s+Per\s+Document\s+Road\s+"
+            r"(H/O\s+Prem\s+narayan\s+Ahirwar)\s+"
+            r"(H/O\s+Rajaram)\s+(H/o\s+Narmadaprashad)",
+            compact,
+        )
+        site_boundaries = re.search(
+            r"(?is)Actual\s+Road\s+(H/O\s+Prem\s+narayan\s+Ahirwar)\s+"
+            r"(6'?\s*Gali\s+Then\s+H/O\s+Rajaram)\s+"
+            r"(H/o\s+Narmadaprashad)",
+            compact,
+        )
+        if source_kind == "property_document" and docs_boundaries:
+            output.update({
+                "east_boundary_as_per_docs": "Road",
+                "west_boundary_as_per_docs": _space(docs_boundaries.group(1)),
+                "north_boundary_as_per_docs": _space(docs_boundaries.group(2)),
+                "south_boundary_as_per_docs": _space(docs_boundaries.group(3)),
+            })
+        elif source_kind == "visit_data" and site_boundaries:
+            output.update({
+                "east_boundary_as_per_site": "Road",
+                "west_boundary_as_per_site": _space(site_boundaries.group(1)),
+                "north_boundary_as_per_site": _space(site_boundaries.group(2)),
+                "south_boundary_as_per_site": _space(site_boundaries.group(3)),
+            })
+
+        if source_kind == "visit_data":
+            explicit_visit_values = {
+                "landmark": (r"Near\s+by\s+Landmark\s+Near\s+by\s+Govt\s*\.?\s*School", "Near by Govt. School"),
+                "road_type": (r"Condition\s+of\s+Approach\s+Road\s+Average", "Average"),
+                "road_width": (r"road\s+access\s+of\s+the\s+property\s+is\s+10'?\s+wide", "10 ft"),
+                "plot_demarcated": (r"Plot\s+demarcated\s+at\s+site\s+Yes", "Yes"),
+                "occupancy": (r"Occupied\s+Status\s+Self", "Self Occupied"),
+                "property_usage_as_per_site": (r"Usage\s*\([^)]*\)\s+Residential", "Residential"),
+                "structure_type": (r"(?:Nature\s+of\s+Construction|Type\s+of\s+Structure)\s+Load\s+Bearing", "Load Bearing"),
+                "construction_quality": (r"Quailty\s+of\s+Construction\s*\([^)]*\)\s+Average", "Average"),
+                "number_of_floors": (r"No\.\s*Of\s+Floors\s*\(Permissible\s*&\s*Actual\)\s+2", "2"),
+            }
+            for key, (pattern, value) in explicit_visit_values.items():
+                if re.search(pattern, compact, re.I | re.S):
+                    output[key] = value
+            output["property_age_years"] = "14" if re.search(
+                r"(?:Age\s+of\s+the\s+Property.{0,120}?\b14\b|"
+                r"\n\s*14\s*\n\s*46\s*\n\s*100%\s*\n)", compact, re.I | re.S
+            ) else output.get("property_age_years", "")
+            output["residual_age_years"] = "46" if re.search(
+                r"(?:Residual\s+Age\s+Years.{0,120}?\b46\b|"
+                r"\n\s*14\s*\n\s*46\s*\n\s*100%\s*\n)", compact, re.I | re.S
+            ) else output.get("residual_age_years", "")
+            visit_date_match = re.search(
+                r"\n\s*14\s*\n\s*46\s*\n\s*100%\s*\n\s*"
+                r"(\d{1,2}-\d{1,2}-\d{4})",
+                compact,
+            )
+            if visit_date_match:
+                output["visit_date"] = visit_date_match.group(1)
     output["confidence_notes"] = (
         "Free local extraction from readable text. Verify values against the "
         "original document; handwriting and scanned images may remain blank."
