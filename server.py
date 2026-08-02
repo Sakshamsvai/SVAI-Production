@@ -965,6 +965,20 @@ def apply_application_correction(details, existing_case, attachments):
     return True
 
 
+def email_fetch_folders(account):
+    """Folders that can contain a real incoming assignment for a provider."""
+    provider = (account.provider or "").casefold()
+    address = (account.email or "").casefold()
+    if provider == "gmail" or address.endswith("@gmail.com") or address.endswith("@googlemail.com"):
+        # Gmail moves messages out of Inbox after a rule/archive, but retains
+        # them in All Mail. Inbox remains as a compatibility fallback.
+        return ['"[Gmail]/All Mail"', '"[Google Mail]/All Mail"', "INBOX"]
+    if provider == "yahoo" or address.endswith("@yahoo.com"):
+        # Yahoo users commonly archive case-assignment mails after reading.
+        return ["INBOX", "Archive"]
+    return ["INBOX"]
+
+
 def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
     created = 0
     updated = 0
@@ -980,26 +994,39 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
     warning = ""
     try:
         mail.login(account.email, password)
-        mail.select("INBOX")
         since = start_date.strftime("%d-%b-%Y")
         before = (end_date + timedelta(days=1)).strftime("%d-%b-%Y")
-        status, payload = mail.search(None, "SINCE", since, "BEFORE", before)
-        if status != "OK":
-            return {"created": 0, "ignored": 0, "message": "Inbox search failed"}
-        ids = payload[0].split()[-2000:]
-        for msg_id in ids:
-            status, msg_data = mail.fetch(msg_id, "(RFC822)")
+        raw_messages = []
+        scanned_folders = []
+        for folder in email_fetch_folders(account):
+            status, _ = mail.select(folder)
             if status != "OK":
                 continue
-            raw = next((x[1] for x in msg_data if isinstance(x, tuple)), None)
-            if not raw:
+            status, payload = mail.search(None, "SINCE", since, "BEFORE", before)
+            if status != "OK":
                 continue
+            scanned_folders.append(folder.strip('"'))
+            for msg_id in payload[0].split()[-2000:]:
+                status, msg_data = mail.fetch(msg_id, "(RFC822)")
+                if status != "OK":
+                    continue
+                raw = next((x[1] for x in msg_data if isinstance(x, tuple)), None)
+                if raw:
+                    raw_messages.append((msg_id, raw))
+        if not scanned_folders:
+            return {"created": 0, "ignored": 0, "message": "Mailbox folder search failed"}
+
+        seen_message_ids = set()
+        for msg_id, raw in raw_messages:
             message = email_lib.message_from_bytes(raw)
             subject = decode_header_value(message.get("Subject", ""))
             sender = decode_header_value(message.get("From", ""))
             body = latest_email_body(email_body(message))
             followup_mail = is_followup_email(subject, body)
             unique_id = message.get("Message-ID") or f"{account.email}:{msg_id.decode()}"
+            if unique_id in seen_message_ids:
+                continue
+            seen_message_ids.add(unique_id)
             received = None
             try:
                 received = email_lib.utils.parsedate_to_datetime(message.get("Date")).replace(
@@ -1107,7 +1134,10 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
         return {
             "created": created, "updated": updated, "ignored": ignored,
             "deduplicated": deduplicated,
-            "message": f"Fetched {start_date:%d-%m-%Y} to {end_date:%d-%m-%Y}",
+            "message": (
+                f"Fetched {start_date:%d-%m-%Y} to {end_date:%d-%m-%Y} "
+                f"from {', '.join(scanned_folders)}"
+            ),
             "warning": warning,
         }
     except imaplib.IMAP4.abort as exc:

@@ -41,6 +41,7 @@ from server import (  # noqa: E402
     existing_case_for_duplicate_assignment, normalized_application_number,
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
+    email_fetch_folders,
 )
 
 
@@ -594,6 +595,13 @@ class SvaiSmokeTests(unittest.TestCase):
             self.assertTrue(profile["source_reviewed"])
             self.assertEqual(case.property_address, "Engineer Actual Address")
             self.assertEqual(case.status, "Source Data Reviewed")
+
+    def test_email_fetch_scans_assignment_folders(self):
+        gmail = EmailAccount(email="valuer@gmail.com", encrypted_password="x", provider="gmail")
+        yahoo = EmailAccount(email="valuer@yahoo.com", encrypted_password="x", provider="yahoo")
+        self.assertIn('"[Gmail]/All Mail"', email_fetch_folders(gmail))
+        self.assertIn("INBOX", email_fetch_folders(gmail))
+        self.assertEqual(email_fetch_folders(yahoo), ["INBOX", "Archive"])
 
     def test_email_prefilter_and_regex_extraction(self):
         subject = "Fresh Technical Valuation - APP NO: LAP-2026-0091"
