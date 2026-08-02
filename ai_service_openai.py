@@ -30,6 +30,7 @@ VALUATION_TERMS = (
     "site investigation initiation",
     "subsequent visit required", "technical case assignment",
     "property inspection request", "site inspection request",
+    "audit initiation", "tsr audit",
 )
 CASE_TERMS = (
     "fresh", "subsequent", "part", "tranche", "tranch", "revisit", "re-visit",
@@ -48,6 +49,7 @@ BANK_DOMAIN_NAMES = {
     "bajajfinserv": "Bajaj Housing Finance",
     "ummeedhfc": "Ummeed Housing Finance",
     "lifc": "Laxmi India Finance",
+    "lifl": "Laxmi India Finance",
     "laxmiindiafinleasecap": "Laxmi India Finance",
     "sbfc": "SBFC Finance",
     "dcbbank": "DCB Bank",
@@ -388,7 +390,7 @@ def deterministic_email_candidate(subject, body, sender=""):
         and any(term in subject_text for term in ("technical", "valuation"))
     )
     structured_task = bool(re.search(
-        r"\btask\s+(?:technical|site\s+investigation).*?\binitiation\b",
+        r"\btask\s+(?:technical|site\s+investigation|tsr\s*-\s*audit).*?\binitiation\b",
         subject_text,
     ))
     named_property_case = (

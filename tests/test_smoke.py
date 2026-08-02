@@ -37,7 +37,8 @@ from report_service import fill_docx_template, fill_excel_template  # noqa: E402
 from server import (  # noqa: E402
     EmailAccount, FileAsset, User, ValuationCase, app, apply_email_details,
     apply_followup_to_existing_case, db, encrypt_password, is_followup_email,
-    normalized_application_number, safe_json, valuation_defaults_from_profile,
+    existing_case_for_duplicate_assignment, normalized_application_number,
+    safe_json, valuation_defaults_from_profile,
 )
 
 
@@ -545,6 +546,49 @@ class SvaiSmokeTests(unittest.TestCase):
             "LAP20260091",
         )
 
+        muthoot_subject = "Task TSR - Audit Initiation -GWA-PRO-003294GWALIOR (Sanjay Yadav)"
+        self.assertTrue(deterministic_email_candidate(muthoot_subject, "Audit task initiated."))
+        muthoot = regex_email_extract(
+            muthoot_subject, "Audit task initiated.", "homefinconnect@muthoothomefin.com"
+        )
+        self.assertEqual(muthoot["application_number"], "GWA-PRO-003294")
+        self.assertEqual(muthoot["customer_name"], "Sanjay Yadav")
+        self.assertEqual(muthoot["bank_name"], "Muthoot Homefin")
+
+        lifc = regex_email_extract(
+            "LIFC - TECHNICAL Case Assignment | LAPAST100029996 | Order No - 57902 | ASHTA (MP) Branch",
+            "Applicant Name: Jitendra\nApplication Number: LAPAST100029996",
+            "notifications@lifl.in",
+        )
+        self.assertTrue(lifc["is_valuation"])
+        self.assertEqual(lifc["bank_name"], "Laxmi India Finance")
+
+    def test_duplicate_fresh_assignment_merges_but_subsequent_stays_separate(self):
+        with app.app_context():
+            account = EmailAccount(
+                email="duplicates@example.com",
+                encrypted_password=encrypt_password("abcdefghijklmnop"),
+                provider="gmail",
+                active=True,
+            )
+            fresh = ValuationCase(
+                application_number="GWA-PRO-003283",
+                customer_name="Ginny Sabharwal",
+                source_email=account.email,
+                case_type="Fresh",
+            )
+            db.session.add_all([account, fresh])
+            db.session.commit()
+            self.assertEqual(
+                existing_case_for_duplicate_assignment({
+                    "application_number": "GWA PRO 003283", "case_type": "Fresh",
+                }, account).id,
+                fresh.id,
+            )
+            self.assertIsNone(existing_case_for_duplicate_assignment({
+                "application_number": "GWA-PRO-003283", "case_type": "Subsequent",
+            }, account))
+
     def test_followup_report_request_updates_existing_case_without_new_mis_row(self):
         with app.app_context():
             case = ValuationCase(
@@ -815,13 +859,13 @@ class SvaiSmokeTests(unittest.TestCase):
         workbook = load_workbook(io.BytesIO(response.data), data_only=False)
         sheet = workbook["ALL BANK"]
         expected = [
-            "SR NO", "Date", "CUSTOMER NAME", "APPLICATION NO", "CONTACT NUMBER",
-            "BANK", "CASE TYPE", "STATUS", "ADDRESS", "VISIT BY", "BRANCH",
+            "SR NO", "Date", "Time", "CUSTOMER NAME", "APPLICATION NO", "CONTACT NUMBER",
+            "CASE TYPE", "BANK", "STATUS", "ADDRESS", "VISIT BY", "BRANCH",
             "Pending", "K.M",
         ]
-        self.assertEqual([sheet.cell(1, col).value for col in range(1, 14)], expected)
+        self.assertEqual([sheet.cell(1, col).value for col in range(1, 15)], expected)
         application_numbers = [
-            sheet.cell(row, 4).value for row in range(2, sheet.max_row + 1)
+            sheet.cell(row, 5).value for row in range(2, sheet.max_row + 1)
         ]
         self.assertIn("MIS-IN-001", application_numbers)
         self.assertNotIn("MIS-OUT-001", application_numbers)

@@ -533,8 +533,33 @@ def existing_case_for_application(application_number, exclude_case=None, subject
     return matches[0] if matches else None
 
 
+def existing_case_for_duplicate_assignment(details, account):
+    """Merge duplicate Fresh/Audit emails, but keep real subsequent/revisit work separate."""
+    key = normalized_application_number(details.get("application_number", ""))
+    if not key:
+        return None
+    incoming_type = (details.get("case_type") or "").strip().casefold()
+    if incoming_type in {"subsequent", "revisit", "part / tranche"}:
+        return None
+    candidates = ValuationCase.query.filter(
+        ValuationCase.archived.is_(False),
+        ValuationCase.source_email == account.email,
+    ).order_by(
+        db.func.coalesce(ValuationCase.email_received_at, ValuationCase.created_at).desc()
+    ).all()
+    return next(
+        (
+            item for item in candidates
+            if normalized_application_number(item.application_number) == key
+            and (item.case_type or "").strip().casefold() == incoming_type
+        ),
+        None,
+    )
+
+
 def apply_followup_to_existing_case(
-    target, details, attachments, subject, received, unique_id
+    target, details, attachments, subject, received, unique_id,
+    action="Merged into existing MIS case; no new row created",
 ):
     if _message_already_recorded(target, unique_id):
         return False
@@ -553,7 +578,7 @@ def apply_followup_to_existing_case(
         "message_id": unique_id,
         "subject": subject,
         "received_at": received.isoformat() if received else "",
-        "action": "Merged into existing MIS case; no new row created",
+        "action": action,
     })
     target.extracted_json = json.dumps(stored, ensure_ascii=False)
     db.session.commit()
@@ -785,7 +810,18 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 updated += 1
                 continue
 
-            case = existing_case or ValuationCase()
+            duplicate_case = existing_case or existing_case_for_duplicate_assignment(
+                details, account
+            )
+            if duplicate_case:
+                if apply_followup_to_existing_case(
+                    duplicate_case, details, attachments, subject, received, unique_id,
+                    action="Duplicate assignment merged into existing MIS case",
+                ):
+                    updated += 1
+                continue
+
+            case = ValuationCase()
             apply_email_details(case, details, account, subject, received, unique_id)
             db.session.add(case)
             db.session.commit()
@@ -2385,13 +2421,24 @@ def export_mis():
         ws = wb["ALL BANK"] if "ALL BANK" in wb.sheetnames else wb.active
         if ws.max_row > 1:
             ws.delete_rows(2, ws.max_row - 1)
+        # The bank MIS format predates the received-time column. Insert it in
+        # place so its layout remains the source template rather than rebuilt.
+        if str(ws.cell(1, 3).value or "").strip().casefold() != "time":
+            ws.insert_cols(3)
+        headers = [
+            "SR NO", "Date", "Time", "CUSTOMER NAME", "APPLICATION NO",
+            "CONTACT NUMBER", "CASE TYPE", "BANK", "STATUS", "ADDRESS",
+            "VISIT BY", "BRANCH", "Pending", "K.M",
+        ]
+        for column, header in enumerate(headers, 1):
+            ws.cell(1, column).value = header
     else:
         wb = Workbook()
         ws = wb.active
         ws.title = "ALL BANK"
         ws.append([
-            "SR NO", "Date", "CUSTOMER NAME", "APPLICATION NO", "CONTACT NUMBER",
-            "BANK", "CASE TYPE", "STATUS", "ADDRESS", "VISIT BY", "BRANCH",
+            "SR NO", "Date", "Time", "CUSTOMER NAME", "APPLICATION NO", "CONTACT NUMBER",
+            "CASE TYPE", "BANK", "STATUS", "ADDRESS", "VISIT BY", "BRANCH",
             "Pending", "K.M",
         ])
         for cell in ws[1]:
@@ -2403,8 +2450,9 @@ def export_mis():
         case_date = case.email_received_at or case.created_at
         ws.append([
             index, case_date if case_date else "",
+            case_date.strftime("%I:%M %p") if case_date else "",
             case.customer_name, case.application_number, case.contact_number,
-            case.bank_name, case.case_type, case.status, case.property_address,
+            case.case_type, case.bank_name, case.status, case.property_address,
             case.visit_by, case.branch_name, profile.get("pending", ""),
             profile.get("distance_from_branch", profile.get("km", "")),
         ])

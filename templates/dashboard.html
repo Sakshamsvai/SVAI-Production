@@ -47,8 +47,8 @@
   <div class="table-wrap">
     <table class="mis-table">
       <thead><tr>
-        <th>SR NO</th><th>Date</th><th>CUSTOMER NAME</th><th>APPLICATION NO</th>
-        <th>CONTACT NUMBER</th><th>BANK</th><th>CASE TYPE</th><th>STATUS</th>
+        <th>SR NO</th><th>Date</th><th>Time</th><th>CUSTOMER NAME</th><th>APPLICATION NO</th>
+        <th>CONTACT NUMBER</th><th>CASE TYPE</th><th>BANK</th><th>STATUS</th>
         <th>ADDRESS</th><th>VISIT BY</th><th>BRANCH</th><th>Action</th>
       </tr></thead>
       <tbody>
@@ -57,11 +57,12 @@
         <tr>
           <td>{{ loop.index }}</td>
           <td>{{ case_date.strftime('%d-%m-%Y') if case_date else '' }}</td>
+          <td>{{ case_date.strftime('%I:%M %p') if case_date else '' }}</td>
           <td><b>{{ case.customer_name or '—' }}</b></td>
           <td class="mono">{{ case.application_number or '—' }}</td>
           <td>{{ case.contact_number or '—' }}</td>
-          <td>{{ case.bank_name or '—' }}</td>
           <td>{{ case.case_type or '—' }}</td>
+          <td>{{ case.bank_name or '—' }}</td>
           <td><span class="pill">{{ case.status }}</span></td>
           <td class="address">{{ case.property_address or '—' }}</td>
           <td>{{ case.visit_by or '—' }}</td>
@@ -69,7 +70,7 @@
           <td><a class="mini-button" href="{{ url_for('case_detail', case_id=case.id) }}">Open</a></td>
         </tr>
       {% else %}
-        <tr><td colspan="12" class="empty">No valuation cases found for this date range.</td></tr>
+        <tr><td colspan="13" class="empty">No valuation cases found for this date range.</td></tr>
       {% endfor %}
       </tbody>
     </table>
