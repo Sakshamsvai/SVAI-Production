@@ -2128,9 +2128,10 @@ def import_mis():
             if value and not str(getattr(target, field) or "").strip():
                 setattr(target, field, value)
     db.session.commit()
+    deduplicated = merge_cross_mailbox_duplicate_cases()
     flash(
         f"MIS import complete: {created} case(s) added, {matched} existing matched. "
-        "Duplicate application rows nahi banayi gayi.",
+        f"{deduplicated} repeated case(s) merged. Duplicate application rows nahi banayi gayi.",
         "success",
     )
     return redirect(url_for("dashboard"))
