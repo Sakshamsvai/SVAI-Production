@@ -1090,9 +1090,10 @@ def fetch_full_message(mail, msg_id):
     )
 
 
-def enrich_missing_address_from_email_document(details, mail, msg_id):
+def enrich_missing_mis_fields_from_email_document(details, mail, msg_id):
     """Read supported documents temporarily; never save them as FileAssets."""
-    if (details.get("property_address") or "").strip():
+    essential = ("application_number", "customer_name", "property_address")
+    if all((details.get(field) or "").strip() for field in essential):
         return details
     raw = fetch_full_message(mail, msg_id)
     if not raw:
@@ -1208,7 +1209,7 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
             # extracting MIS text. Nothing is saved as a FileAsset.
             if details.get("is_valuation", False) and not followup_mail:
                 if mail.select(source_folder)[0] == "OK":
-                    details = enrich_missing_address_from_email_document(
+                    details = enrich_missing_mis_fields_from_email_document(
                         details, mail, msg_id
                     )
             attachments = []
@@ -1272,8 +1273,6 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
         }
     except imaplib.IMAP4.abort as exc:
         warning = f"Mailbox connection ended early: {exc}"
-        account.last_fetch_at = datetime.utcnow()
-        db.session.commit()
         return {
             "created": created,
             "updated": updated,

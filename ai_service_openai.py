@@ -38,6 +38,14 @@ CASE_TERMS = (
     "resale", "balance transfer", "plot purchase", "self-construction", "p+c",
 )
 
+ASSIGNMENT_ACTION_TERMS = (
+    "new case", "case assignment", "case assigned", "case allocation",
+    "technical request", "technical case", "initiate", "initiation",
+    "valuation", "property inspection", "site inspection", "site visit",
+    "property visit", "audit initiation", "tsr", "field investigation",
+    "collateral inspection",
+)
+
 GENERIC_IDENTIFIER_WORDS = {
     "app", "applicant", "application", "borrower", "case", "customer", "deal",
     "id", "lead", "loan", "name", "no", "number", "proposal", "reference",
@@ -387,12 +395,11 @@ def deterministic_email_candidate(subject, body, sender=""):
     )
     if any(term in f" {text} " for term in reject_terms):
         return False
-    # A forwarded/replied trail from Gmail/Yahoo can contain an old technical
-    # assignment.  It is not itself a new bank instruction, so never create a
-    # fresh MIS row from it.  This also prevents "Bank: Gmail" rows.
-    if _sender_domain(sender) in PUBLIC_MAIL_DOMAINS:
-        return False
+    sender_domain = _sender_domain(sender)
+    public_sender = sender_domain in PUBLIC_MAIL_DOMAINS
     assignment_hits = sum(term in text for term in VALUATION_TERMS)
+    action_hits = sum(term in text for term in ASSIGNMENT_ACTION_TERMS)
+    case_hits = sum(term in text for term in CASE_TERMS)
     identifiers = bool(re.search(
         r"(?i)\b(?:(?:application|app|case|proposal|loan)\s*(?:no|number|id|#)|"
         r"lead\s*(?:id)?\s*(?:no|number|#)?)"
@@ -412,10 +419,31 @@ def deterministic_email_candidate(subject, body, sender=""):
         and any(term in text for term in ("applicant", "borrower", "customer"))
         and any(term in text for term in CASE_TERMS)
     )
-    return (
+    explicit_identity = any(term in text for term in (
+        "applicant", "borrower", "customer", "property address", "site address",
+        "collateral address", "branch name",
+    ))
+    property_identity = any(term in text for term in (
+        "property address", "site address", "collateral address",
+    ))
+    strong_assignment = (
         assignment_hits > 0 or subject_structure or structured_task
-        or (identifiers and named_property_case)
+        or (identifiers and action_hits > 0)
+        or (action_hits > 0 and case_hits > 0 and explicit_identity)
+        or named_property_case
     )
+    if not strong_assignment:
+        return False
+    # Public mailboxes are sometimes used by bank staff or to forward a real
+    # assignment. Keep them only when the message also carries a strong case
+    # identity; duplicate application numbers are merged later by the importer.
+    if public_sender:
+        return bool(
+            structured_task or subject_structure
+            or (assignment_hits > 0 and (identifiers or property_identity))
+            or (identifiers and action_hits > 0)
+        )
+    return True
 
 
 def _subject_fields(subject):

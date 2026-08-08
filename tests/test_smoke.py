@@ -695,6 +695,18 @@ class SvaiSmokeTests(unittest.TestCase):
             "Dear Team,\nPlease share the technical report.\n"
             "On Friday someone wrote:\nCustomer Name: Ramesh Kumar",
         ))
+
+    def test_public_mail_sender_keeps_strong_new_assignment_only(self):
+        self.assertTrue(deterministic_email_candidate(
+            "Fresh Technical Valuation - Application No LAPGUN100030646",
+            "Applicant: Surendra Singh Yadav\nProperty Address: Village Guna",
+            "bank.employee@gmail.com",
+        ))
+        self.assertFalse(deterministic_email_candidate(
+            "Technical discussion",
+            "Please review whenever convenient.",
+            "somebody@yahoo.com",
+        ))
         self.assertFalse(is_followup_email(
             "Subsequent visit required - LAP-2026-0091",
             "Please arrange subsequent visit due to construction stage complete.",
