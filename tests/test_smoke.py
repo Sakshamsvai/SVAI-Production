@@ -692,6 +692,45 @@ class SvaiSmokeTests(unittest.TestCase):
                 "application_number": "GWA-PRO-003283", "case_type": "Subsequent",
             }, account))
 
+    def test_same_special_assignment_from_two_mailboxes_merges(self):
+        received = __import__("datetime").datetime(2026, 8, 8, 10, 30)
+        with app.app_context():
+            gmail = ValuationCase(
+                application_number="PART-101", case_type="Part / Tranche",
+                source_email="one@gmail.com", email_subject="Part valuation PART-101",
+                email_received_at=received,
+            )
+            yahoo = EmailAccount(
+                email="two@yahoo.com", encrypted_password="x", provider="yahoo",
+            )
+            db.session.add_all([gmail, yahoo])
+            db.session.commit()
+            match = existing_case_for_duplicate_assignment(
+                {"application_number": "PART 101", "case_type": "Part / Tranche"},
+                yahoo, "Part valuation PART-101", received,
+            )
+            self.assertEqual(match.id, gmail.id)
+
+    def test_case_delete_removes_case_and_related_assets(self):
+        with app.app_context():
+            case = ValuationCase(application_number="DELETE-101", customer_name="Remove Me")
+            db.session.add(case)
+            db.session.commit()
+            case_id = case.id
+            db.session.add(FileAsset(
+                case_id=case_id, asset_type="document", filename="remove.pdf", content=b"x",
+            ))
+            db.session.commit()
+        self.login()
+        response = self.client.post(
+            f"/cases/{case_id}/delete",
+            data={"_csrf_token": self.csrf()},
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            self.assertIsNone(db.session.get(ValuationCase, case_id))
+            self.assertEqual(FileAsset.query.filter_by(case_id=case_id).count(), 0)
+
     def test_cross_mailbox_same_application_merges_to_one_active_mis_case(self):
         with app.app_context():
             gmail_case = ValuationCase(

@@ -758,25 +758,42 @@ def existing_case_for_application(application_number, exclude_case=None, subject
     return matches[0] if matches else None
 
 
-def existing_case_for_duplicate_assignment(details, account):
+def existing_case_for_duplicate_assignment(details, account, subject="", received=None):
     """Merge same assignment arriving in Gmail and Yahoo; keep new work separate."""
     key = normalized_application_number(details.get("application_number", ""))
     if not key:
         return None
     incoming_type = (details.get("case_type") or "").strip().casefold()
-    if incoming_type in {"subsequent", "revisit", "part / tranche"}:
-        return None
     candidates = ValuationCase.query.filter(
         ValuationCase.archived.is_(False),
     ).order_by(
         db.func.coalesce(ValuationCase.email_received_at, ValuationCase.created_at).asc(),
         ValuationCase.id.asc(),
     ).all()
+    matches = [
+        item for item in candidates
+        if normalized_application_number(item.application_number) == key
+    ]
+    if incoming_type in {"subsequent", "revisit", "part / tranche"}:
+        incoming_subject = normalized_email_subject(subject)
+        return next(
+            (
+                item for item in matches
+                if (item.case_type or "").strip().casefold() == incoming_type
+                and (item.source_email or "").casefold() != (account.email or "").casefold()
+                and incoming_subject
+                and normalized_email_subject(item.email_subject) == incoming_subject
+                and (
+                    not received or not item.email_received_at
+                    or abs((item.email_received_at.date() - received.date()).days) <= 1
+                )
+            ),
+            None,
+        )
     return next(
         (
-            item for item in candidates
-            if normalized_application_number(item.application_number) == key
-            and (item.case_type or "").strip().casefold()
+            item for item in matches
+            if (item.case_type or "").strip().casefold()
             not in {"subsequent", "revisit", "part / tranche"}
         ),
         None,
@@ -792,8 +809,16 @@ def merge_cross_mailbox_duplicate_cases():
     ).all():
         key = normalized_application_number(case.application_number)
         kind = (case.case_type or "").strip().casefold()
-        if not key or kind in {"subsequent", "revisit", "part / tranche"}:
+        if not key:
             continue
+        if kind in {"subsequent", "revisit", "part / tranche"}:
+            subject_key = normalized_email_subject(case.email_subject)
+            received_day = case.email_received_at.date() if case.email_received_at else None
+            if not subject_key or not received_day:
+                continue
+            key = (key, kind, subject_key, received_day)
+        else:
+            key = (key, "standard")
         groups.setdefault(key, []).append(case)
     merged = 0
     for cases in groups.values():
@@ -801,6 +826,13 @@ def merge_cross_mailbox_duplicate_cases():
             continue
         canonical = cases[0]
         for duplicate in cases[1:]:
+            if (
+                (canonical.source_email or "").casefold()
+                == (duplicate.source_email or "").casefold()
+                and (canonical.case_type or "").strip().casefold()
+                in {"subsequent", "revisit", "part / tranche"}
+            ):
+                continue
             # Do not merge two genuinely different banks under an accidentally reused ID.
             if (
                 canonical.bank_name and duplicate.bank_name
@@ -1032,6 +1064,7 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
         before = (end_date + timedelta(days=1)).strftime("%d-%b-%Y")
         raw_messages = []
         scanned_folders = []
+        is_gmail = (account.provider or "").casefold() == "gmail" or account.email.casefold().endswith("@gmail.com")
         for folder in imap_safe_assignment_folders(account, mail):
             status, _ = mail.select(folder)
             if status != "OK":
@@ -1040,17 +1073,21 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
             if status != "OK":
                 continue
             scanned_folders.append(folder.strip('"'))
-            for msg_id in payload[0].split()[-2000:]:
+            for msg_id in payload[0].split():
                 status, msg_data = mail.fetch(msg_id, "(RFC822)")
                 if status != "OK":
                     continue
                 raw = next((x[1] for x in msg_data if isinstance(x, tuple)), None)
                 if raw:
                     raw_messages.append((msg_id, raw))
+            # Gmail All Mail is authoritative and already includes Inbox and
+            # custom-label messages. Stop after the first selectable folder so
+            # the same full messages/attachments are not downloaded repeatedly.
+            if is_gmail:
+                break
         # Gmail's normal IMAP date search can miss a bank message when Gmail
         # has indexed it under a category/label.  Query the known LIFC sender
         # through Gmail's own search syntax as a narrow fallback.
-        is_gmail = (account.provider or "").casefold() == "gmail" or account.email.casefold().endswith("@gmail.com")
         if is_gmail and mail.select('"[Gmail]/All Mail"')[0] == "OK":
             gmail_query = (
                 f"from:(lifl.in) after:{(start_date - timedelta(days=1)):%Y/%m/%d} "
@@ -1159,7 +1196,7 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 continue
 
             duplicate_case = existing_case or existing_case_for_duplicate_assignment(
-                details, account
+                details, account, subject, received
             )
             if duplicate_case:
                 if apply_followup_to_existing_case(
@@ -2774,6 +2811,19 @@ def archive_case(case_id):
     case.status = "Archived" if case.archived else "Reopened"
     db.session.commit()
     return redirect(url_for("dashboard", archived="1" if case.archived else "0"))
+
+
+@app.route("/cases/<int:case_id>/delete", methods=["POST"])
+@login_required
+def delete_case(case_id):
+    case = ValuationCase.query.get_or_404(case_id)
+    label = case.application_number or case.customer_name or f"Case #{case.id}"
+    FileAsset.query.filter_by(case_id=case.id).delete(synchronize_session=False)
+    Valuation.query.filter_by(case_id=case.id).delete(synchronize_session=False)
+    db.session.delete(case)
+    db.session.commit()
+    flash(f"{label} MIS se permanently delete ho gaya.", "success")
+    return redirect(url_for("dashboard"))
 
 
 @app.route("/email-accounts", methods=["GET", "POST"])
