@@ -3,7 +3,6 @@
 <section class="stats">
   <div class="stat"><span>Active Cases</span><b>{{ stats.cases }}</b></div>
   <div class="stat"><span>Property Documents</span><b>{{ stats.documents }}</b></div>
-  <div class="stat"><span>Site Photos</span><b>{{ stats.photos }}</b></div>
   <div class="stat"><span>Generated Reports</span><b>{{ stats.reports }}</b></div>
 </section>
 
@@ -68,8 +67,8 @@
           <td>{{ case.contact_number or '—' }}</td>
           <td>{{ case.case_type or '—' }}</td>
           <td>{{ case.bank_name or '—' }}</td>
-          <td><span class="pill">{{ case.status }}</span></td>
-          <td class="address">{{ case.property_address or '—' }}</td>
+          <td><span class="pill">{{ case.status }}</span><br><small>{{ mailbox_source(case) }}</small></td>
+          <td class="address" title="{{ case.property_address or '' }}">{{ concise_mis_address(case.property_address) or '—' }}</td>
           <td>{{ case.visit_by or '—' }}</td>
           <td>{{ case.branch_name or '—' }}</td>
           <td><form method="post" action="{{ url_for('update_case_km', case_id=case.id) }}" class="km-form"><input type="number" step="0.01" min="0" name="distance_from_branch" value="{{ case_km(case) }}" placeholder="KM"><button class="small">Save</button></form></td>

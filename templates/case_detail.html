@@ -54,15 +54,7 @@
   </div>
 
   <div class="card workflow-step">
-    <div class="step-title"><span>4</span><div><h2>Upload Site Photos</h2><p>Front elevation, side views, road/distant view, selfie, kitchen aur interior photos. Yahan engineer form upload na karein.</p></div></div>
-    <form method="post" enctype="multipart/form-data" action="{{ url_for('upload_visit_files', case_id=case.id) }}" class="stack compact-stack">
-      <input type="file" name="files" accept=".zip,.jpg,.jpeg,.png,.webp" multiple required>
-      <button>Upload Property Photos</button>
-    </form>
-  </div>
-
-  <div class="card workflow-step">
-    <div class="step-title"><span>5</span><div><h2>Upload Report Format</h2><p>Is case ke bank ka original valuation Excel/Word format. Layout ko badla nahi jayega.</p></div></div>
+    <div class="step-title"><span>4</span><div><h2>Upload Report Format</h2><p>Is case ke bank ka original valuation Excel/Word format. Layout ko badla nahi jayega.</p></div></div>
     <form method="post" enctype="multipart/form-data" action="{{ url_for('upload_case_template', case_id=case.id) }}" class="stack compact-stack">
       <input type="hidden" name="bank_name" value="{{ case.bank_name or '' }}">
       <input type="file" name="template" accept=".xlsx,.xlsm,.docx" required>
@@ -71,7 +63,7 @@
   </div>
 
   <div class="card workflow-step ai-step">
-    <div class="step-title"><span>6</span><div><h2>Read & Arrange Files</h2><p>System Property Documents aur Visit Form ko source ke hisab se alag padhega; Site Photos sirf photo section mein lagengi.</p></div></div>
+    <div class="step-title"><span>5</span><div><h2>Auto Fill Valuation Data</h2><p>Available email, documents aur aapke diye data se system fields aur valuation khud fill karega.</p></div></div>
     <form method="post" action="{{ url_for('process_case_ai', case_id=case.id) }}">
       <button class="green">Process All Files</button>
     </form>
@@ -109,7 +101,8 @@
   </div>
 </section>
 
-<section class="card source-review">
+<details class="card source-review">
+  <summary><strong>Optional: extracted data correct karna ho to kholein</strong></summary>
   <div class="section-head">
     <div><h2>Source-wise Report Data — Check & Save</h2><p>Left side sirf uploaded Property Documents se hai. Right side sirf Visit Form/MP Kisan screenshot se hai. Galat ya unreadable value ko yahin correct karein.</p></div>
   </div>
@@ -179,10 +172,11 @@
   {% if profile %}
   <details><summary>View complete extracted profile</summary><pre class="profile-json">{{ profile | tojson(indent=2) }}</pre></details>
   {% endif %}
-</section>
+</details>
 
-<section class="card">
-  <div class="step-title"><span>7</span><div><h2>Valuation Calculation & Manual Review</h2><p>Extracted details verify karein. Market rates/areas engineer ke actual data se confirm karke save karein; calculation paid GPT ke bina bhi chalegi.</p></div></div>
+<details class="card">
+  <summary><strong>Optional: valuation figures manually correct karna ho to kholein</strong></summary>
+  <div class="step-title"><span>6</span><div><h2>Auto-filled Valuation Calculation</h2><p>System available data se calculation bharega. Sirf correction ki zaroorat ho tabhi is form ko use karein.</p></div></div>
   <form method="post" action="{{ url_for('save_valuation', case_id=case.id) }}" class="form-grid four">
     {% set v = valuation %}
     <label>Land Area<input type="number" step="any" name="land_area" value="{{ v.land_area if v else 0 }}"></label>
@@ -208,7 +202,7 @@
     <div><span>Government Value</span><b>₹ {{ "{:,.0f}".format(valuation.govt_value or 0) }}</b></div>
   </div>
   {% endif %}
-</section>
+</details>
 
 <section class="card report-card">
   <h2>Generate Draft Report</h2>

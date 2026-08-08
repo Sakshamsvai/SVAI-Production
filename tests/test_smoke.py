@@ -43,6 +43,7 @@ from server import (  # noqa: E402
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
     email_fetch_folders, mis_import_rows,
+    concise_mis_address, mailbox_source,
     fetch_full_message, fetch_mis_message, imap_safe_assignment_folders,
 )
 
@@ -732,6 +733,28 @@ class SvaiSmokeTests(unittest.TestCase):
             "Dear Team,\nPlease share the technical report.\n"
             "On Friday someone wrote:\nCustomer Name: Ramesh Kumar",
         ))
+
+    def test_lifc_applicant_source_and_concise_mis_address(self):
+        extracted = regex_email_extract(
+            "LIFC - TECHNICAL Case Assignment | LAPSJP100029929 | Order No - 58429 | SHUJALPUR (MP) Branch",
+            "Applicant Name: Ajay Malviya\nVendor Code: TECH073",
+            "notifications@lifl.in",
+        )
+        self.assertEqual(extracted["customer_name"], "Ajay Malviya")
+        gmail_case = ValuationCase(source_email="valuer@gmail.com")
+        yahoo_case = ValuationCase(source_email="valuer@yahoo.com")
+        self.assertEqual(mailbox_source(gmail_case), "Gmail")
+        self.assertEqual(mailbox_source(yahoo_case), "Yahoo")
+        self.assertEqual(
+            concise_mis_address(
+                "Plot 12, Ward 4, Village Hasuya, Tehsil Vidisha, Dist- Vidisha"
+            ),
+            "Village Hasuya, Tehsil Vidisha, Dist- Vidisha",
+        )
+        self.assertEqual(
+            concise_mis_address("House 9, Parvati Puram Colony Vidisha"),
+            "Parvati Puram Colony Vidisha",
+        )
 
     def test_public_mail_sender_keeps_strong_new_assignment_only(self):
         self.assertTrue(deterministic_email_candidate(

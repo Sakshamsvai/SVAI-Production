@@ -970,6 +970,36 @@ def email_case_status(details):
     return "New - Email" if all(required) else "Email Parsed - Review"
 
 
+def mailbox_source(case):
+    email = (case.source_email or "").strip().casefold()
+    if email.endswith("@gmail.com"):
+        return "Gmail"
+    if email.endswith("@yahoo.com") or email.endswith("@yahoo.in"):
+        return "Yahoo"
+    return "Manual / Import" if not email else email
+
+
+def concise_mis_address(value, limit=150):
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" ,;-")
+    if not text:
+        return ""
+    colony = re.search(r"(?i)\bcolony\b", text)
+    locality = re.search(r"(?i)\b(?:village|vill\.?|gram)\b", text)
+    if colony and (not locality or colony.start() < locality.start()):
+        comma = text.rfind(",", 0, colony.start())
+        text = text[comma + 1:].strip() if comma >= 0 else text
+    elif locality:
+        text = text[locality.start():]
+    end = re.search(
+        r"(?i)\b(?:district|distt?\.?)[\s:.-]*[A-Za-z][A-Za-z .'-]{1,45}", text
+    )
+    if end:
+        text = text[:end.end()]
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;-") + "…"
+    return text
+
+
 def apply_email_details(case, details, account, subject, received, unique_id):
     existing_row = bool(case.id)
     values = {
@@ -1302,6 +1332,13 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 details, account, subject, received
             )
             if duplicate_case:
+                if existing_case and _message_already_recorded(existing_case, unique_id):
+                    apply_email_details(
+                        existing_case, details, account, subject, received, unique_id
+                    )
+                    db.session.commit()
+                    updated += 1
+                    continue
                 if apply_followup_to_existing_case(
                     duplicate_case, details, attachments, subject, received, unique_id,
                     action="Duplicate assignment merged into existing MIS case",
@@ -1646,7 +1683,12 @@ def template_security():
         stored = safe_json(case.extracted_json)
         profile = stored.get("case_profile") or stored.get("email") or stored
         return profile.get("distance_from_branch", profile.get("km", ""))
-    return {"csrf_token": session.get("_csrf_token", ""), "case_km": case_km}
+    return {
+        "csrf_token": session.get("_csrf_token", ""),
+        "case_km": case_km,
+        "mailbox_source": mailbox_source,
+        "concise_mis_address": concise_mis_address,
+    }
 
 
 @app.before_request
@@ -2060,7 +2102,6 @@ def dashboard():
     stats = {
         "cases": ValuationCase.query.filter_by(archived=False).count(),
         "documents": FileAsset.query.filter_by(asset_type="document").count(),
-        "photos": FileAsset.query.filter_by(asset_type="photo").count(),
         "reports": FileAsset.query.filter_by(asset_type="report").count(),
     }
     return render_template(
@@ -2623,7 +2664,7 @@ def process_case_ai(case_id):
             if paid_mode else
             f"Free local mode processed {processed} file(s)."
         )
-        + " Review extracted data and valuation before report generation.",
+        + " Available data se valuation fields auto-filled.",
         "success",
     )
     return redirect(url_for("case_detail", case_id=case_id))

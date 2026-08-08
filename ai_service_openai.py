@@ -680,6 +680,8 @@ def regex_email_extract(subject, body, sender):
         r"[A-Z]{2,}[A-Z0-9/\-]*\d[A-Z0-9/\-]*)\b",
     ], text, _clean_application_number)
     customer_name = _first_match([
+        r"(?im)^\s*applicant\s+name\s*[:=\-]\s*"
+        r"(?:mr|mrs|ms|smt|shri)?\.?\s*([A-Za-z][A-Za-z .'-]{1,80})$",
         r"(?im)(?:customer|applicant|borrower)\s*(?:/s)?\s*(?:name(?:/s)?)?"
         r"\s*(?:[:=\-]\s*|\s+)(?:mr|mrs|ms|smt|shri)?\.?\s*"
         r"([A-Za-z][A-Za-z .'-]{1,80}?)(?=\s*(?:\n|\||;|$|"
