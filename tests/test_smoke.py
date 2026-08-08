@@ -814,6 +814,16 @@ class SvaiSmokeTests(unittest.TestCase):
                 yahoo, "Part valuation PART-101", received,
             )
             self.assertEqual(match.id, gmail.id)
+            same_mailbox = EmailAccount(
+                email="one@gmail.com", encrypted_password="x", provider="gmail",
+            )
+            db.session.add(same_mailbox)
+            db.session.commit()
+            same_match = existing_case_for_duplicate_assignment(
+                {"application_number": "PART-101", "case_type": "Part / Tranche"},
+                same_mailbox, "Part valuation PART-101", received,
+            )
+            self.assertEqual(same_match.id, gmail.id)
 
     def test_case_delete_removes_case_and_related_assets(self):
         with app.app_context():

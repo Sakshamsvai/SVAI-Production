@@ -857,7 +857,6 @@ def existing_case_for_duplicate_assignment(details, account, subject="", receive
             (
                 item for item in matches
                 if (item.case_type or "").strip().casefold() == incoming_type
-                and (item.source_email or "").casefold() != (account.email or "").casefold()
                 and incoming_subject
                 and normalized_email_subject(item.email_subject) == incoming_subject
                 and (
@@ -903,13 +902,6 @@ def merge_cross_mailbox_duplicate_cases():
             continue
         canonical = cases[0]
         for duplicate in cases[1:]:
-            if (
-                (canonical.source_email or "").casefold()
-                == (duplicate.source_email or "").casefold()
-                and (canonical.case_type or "").strip().casefold()
-                in {"subsequent", "revisit", "part / tranche"}
-            ):
-                continue
             # Do not merge two genuinely different banks under an accidentally reused ID.
             if (
                 canonical.bank_name and duplicate.bank_name
