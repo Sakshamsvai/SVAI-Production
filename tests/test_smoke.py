@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,7 +42,7 @@ from server import (  # noqa: E402
     existing_case_for_duplicate_assignment, normalized_application_number,
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
-    email_fetch_folders,
+    email_fetch_folders, mis_import_rows,
     fetch_full_message, fetch_mis_message, imap_safe_assignment_folders,
 )
 
@@ -611,6 +612,42 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn('"[Gmail]/All Mail"', email_fetch_folders(gmail))
         self.assertIn("INBOX", email_fetch_folders(gmail))
         self.assertEqual(email_fetch_folders(yahoo), ["INBOX", "Archive"])
+
+    def test_existing_mis_import_adds_and_merges_without_duplicate_application(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "ALL BANK"
+        sheet.append([
+            "SR NO", "Date", "CUSTOMER NAME", "APPLICATION NO", "CONTACT NUMBER",
+            "BANK", "CASE TYPE", "STATUS", "ADDRESS", "VISIT BY", "BRANCH", "K.M",
+        ])
+        sheet.append([
+            1, datetime(2026, 8, 7), "Import Customer", "IMPORT-2026-001",
+            "9876543210", "Test Bank", "Fresh", "Visit Pending",
+            "Plot 1, Vidisha", "Engineer", "Vidisha", 12,
+        ])
+        stream = io.BytesIO()
+        workbook.save(stream)
+        stream.seek(0)
+        parsed = mis_import_rows(stream)
+        self.assertEqual(parsed[0]["application_number"], "IMPORT-2026-001")
+        self.assertEqual(parsed[0]["distance"], 12)
+
+        self.login()
+        first = self.client.post("/mis/import", data={
+            "_csrf_token": self.csrf(),
+            "mis_file": (io.BytesIO(stream.getvalue()), "MIS.xlsx"),
+        }, content_type="multipart/form-data")
+        self.assertEqual(first.status_code, 302)
+        second = self.client.post("/mis/import", data={
+            "_csrf_token": self.csrf(),
+            "mis_file": (io.BytesIO(stream.getvalue()), "MIS.xlsx"),
+        }, content_type="multipart/form-data")
+        self.assertEqual(second.status_code, 302)
+        with app.app_context():
+            matches = ValuationCase.query.filter_by(application_number="IMPORT-2026-001").all()
+            self.assertEqual(len(matches), 1)
+            self.assertEqual(matches[0].customer_name, "Import Customer")
 
     def test_email_fetch_includes_custom_incoming_folder_but_not_sent_or_junk(self):
         class MailboxList:

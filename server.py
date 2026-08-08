@@ -543,6 +543,75 @@ def billing_upload_rows(upload):
     return rows
 
 
+def mis_import_rows(upload):
+    """Read an existing MIS workbook so its cases can be merged into SVAI."""
+    try:
+        workbook = load_workbook(io.BytesIO(upload.read()), data_only=True, read_only=True)
+    except Exception as exc:
+        raise ValueError(f"MIS Excel read nahi hua: {exc}")
+    sheet = workbook["ALL BANK"] if "ALL BANK" in workbook.sheetnames else workbook.active
+    aliases = {
+        "date": {"date", "receiveddate"},
+        "customer_name": {"customername", "applicantname", "customer"},
+        "application_number": {"applicationno", "applicationnumber", "leadidno", "idno", "leadproposalno", "leadpurposalno"},
+        "contact_number": {"contactnumber", "mobilenumber", "mobile", "contact"},
+        "bank_name": {"bank", "bankname"},
+        "case_type": {"casetype", "product", "productname"},
+        "status": {"status", "casestatus"},
+        "property_address": {"address", "propertyaddress"},
+        "visit_by": {"visitby", "engineer", "engineername"},
+        "branch_name": {"branch", "branchname"},
+        "distance": {"km", "distance", "distancekm"},
+    }
+    header_row = None
+    columns = {}
+    for row_number, row in enumerate(sheet.iter_rows(values_only=True), 1):
+        found = {normalized_header(value): index for index, value in enumerate(row) if value is not None}
+        if any(name in found for name in aliases["customer_name"]) and any(
+            name in found for name in aliases["application_number"]
+        ):
+            header_row = row_number
+            for field, names in aliases.items():
+                match = next((found[name] for name in names if name in found), None)
+                if match is not None:
+                    columns[field] = match
+            break
+    if not header_row:
+        raise ValueError("Uploaded MIS me Customer Name aur Application No headings nahi mili.")
+
+    rows = []
+    for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
+        item = {
+            field: (row[index] if index < len(row) else "")
+            for field, index in columns.items()
+        }
+        application = str(item.get("application_number") or "").strip()
+        customer = str(item.get("customer_name") or "").strip()
+        if not application and not customer:
+            continue
+        raw_date = item.get("date")
+        if isinstance(raw_date, datetime):
+            received_at = raw_date
+        elif isinstance(raw_date, date):
+            received_at = datetime.combine(raw_date, datetime.min.time())
+        elif isinstance(raw_date, (int, float)):
+            received_at = datetime(1899, 12, 30) + timedelta(days=float(raw_date))
+        else:
+            received_at = None
+            for date_format in ("%d-%b-%y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+                try:
+                    received_at = datetime.strptime(str(raw_date or "").strip(), date_format)
+                    break
+                except ValueError:
+                    continue
+        item["received_at"] = received_at
+        item["application_number"] = application
+        item["customer_name"] = customer
+        item["distance"] = numeric_km(item.get("distance"))
+        rows.append(item)
+    return rows
+
+
 def billing_column_map(sheet):
     aliases = {
         "serial": {"sno", "srno", "serialno"},
@@ -1090,10 +1159,9 @@ def fetch_full_message(mail, msg_id):
     )
 
 
-def enrich_missing_mis_fields_from_email_document(details, mail, msg_id):
+def enrich_missing_address_from_email_document(details, mail, msg_id):
     """Read supported documents temporarily; never save them as FileAssets."""
-    essential = ("application_number", "customer_name", "property_address")
-    if all((details.get(field) or "").strip() for field in essential):
+    if (details.get("property_address") or "").strip():
         return details
     raw = fetch_full_message(mail, msg_id)
     if not raw:
@@ -1209,7 +1277,7 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
             # extracting MIS text. Nothing is saved as a FileAsset.
             if details.get("is_valuation", False) and not followup_mail:
                 if mail.select(source_folder)[0] == "OK":
-                    details = enrich_missing_mis_fields_from_email_document(
+                    details = enrich_missing_address_from_email_document(
                         details, mail, msg_id
                     )
             attachments = []
@@ -2009,6 +2077,71 @@ def dashboard():
         include_archived=include_archived, date_from=date_from, date_to=date_to,
         ai_enabled=ai_enabled(), ai_model=OPENAI_MODEL,
     )
+
+
+@app.route("/mis/import", methods=["POST"])
+@login_required
+def import_mis():
+    upload = request.files.get("mis_file")
+    if not upload or not upload.filename:
+        flash("MIS .xlsx file select karein.", "error")
+        return redirect(url_for("dashboard"))
+    if Path(upload.filename).suffix.casefold() != ".xlsx":
+        flash("MIS import ke liye .xlsx file hi upload karein.", "error")
+        return redirect(url_for("dashboard"))
+    try:
+        rows = mis_import_rows(upload)
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("dashboard"))
+
+    created = 0
+    matched = 0
+    active_cases = ValuationCase.query.filter_by(archived=False).all()
+    for row in rows:
+        app_key = normalized_application_number(row.get("application_number"))
+        received_at = row.get("received_at")
+        target = next((
+            case for case in active_cases
+            if app_key and normalized_application_number(case.application_number) == app_key
+        ), None)
+        if target is None and not app_key:
+            customer_key = re.sub(r"\s+", " ", str(row.get("customer_name") or "")).strip().casefold()
+            bank_key = re.sub(r"\s+", " ", str(row.get("bank_name") or "")).strip().casefold()
+            target = next((
+                case for case in active_cases
+                if customer_key
+                and re.sub(r"\s+", " ", str(case.customer_name or "")).strip().casefold() == customer_key
+                and (not bank_key or re.sub(r"\s+", " ", str(case.bank_name or "")).strip().casefold() == bank_key)
+                and received_at and (case.email_received_at or case.created_at).date() == received_at.date()
+            ), None)
+        if target is None:
+            target = ValuationCase(
+                email_received_at=received_at,
+                status=str(row.get("status") or "Imported MIS").strip(),
+                extracted_json=json.dumps({
+                    "mis_import": {"distance_from_branch": row.get("distance", "")}
+                }),
+            )
+            db.session.add(target)
+            active_cases.append(target)
+            created += 1
+        else:
+            matched += 1
+        for field in (
+            "application_number", "customer_name", "contact_number", "bank_name",
+            "case_type", "property_address", "visit_by", "branch_name",
+        ):
+            value = str(row.get(field) or "").strip()
+            if value and not str(getattr(target, field) or "").strip():
+                setattr(target, field, value)
+    db.session.commit()
+    flash(
+        f"MIS import complete: {created} case(s) added, {matched} existing matched. "
+        "Duplicate application rows nahi banayi gayi.",
+        "success",
+    )
+    return redirect(url_for("dashboard"))
 
 
 @app.route("/cases/new", methods=["GET", "POST"])
