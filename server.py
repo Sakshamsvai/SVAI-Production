@@ -1140,7 +1140,7 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
             for msg_id in payload[0].split():
                 raw = fetch_mis_message(mail, msg_id)
                 if raw:
-                    raw_messages.append((msg_id, raw))
+                    raw_messages.append((folder, msg_id, raw))
             # Gmail All Mail is authoritative and already includes Inbox and
             # custom-label messages. Stop after the first selectable folder so
             # the same full messages/attachments are not downloaded repeatedly.
@@ -1159,18 +1159,20 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 for msg_id in payload[0].split()[-100:]:
                     raw = fetch_mis_message(mail, msg_id)
                     if raw:
-                        raw_messages.append((msg_id, raw))
+                        raw_messages.append(('"[Gmail]/All Mail"', msg_id, raw))
         if not scanned_folders:
             return {"created": 0, "ignored": 0, "message": "Mailbox folder search failed"}
 
         seen_message_ids = set()
-        for msg_id, raw in raw_messages:
+        for source_folder, msg_id, raw in raw_messages:
             message = email_lib.message_from_bytes(raw)
             subject = decode_header_value(message.get("Subject", ""))
             sender = decode_header_value(message.get("From", ""))
             body = latest_email_body(email_body(message))
             followup_mail = is_followup_email(subject, body)
-            unique_id = message.get("Message-ID") or f"{account.email}:{msg_id.decode()}"
+            unique_id = message.get("Message-ID") or (
+                f"{account.email}:{source_folder}:{msg_id.decode()}"
+            )
             if unique_id in seen_message_ids:
                 continue
             seen_message_ids.add(unique_id)
@@ -1205,9 +1207,10 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
             # supported documents temporarily and discard their bytes after
             # extracting MIS text. Nothing is saved as a FileAsset.
             if details.get("is_valuation", False) and not followup_mail:
-                details = enrich_missing_address_from_email_document(
-                    details, mail, msg_id
-                )
+                if mail.select(source_folder)[0] == "OK":
+                    details = enrich_missing_address_from_email_document(
+                        details, mail, msg_id
+                    )
             attachments = []
             details.pop("ai_error", None)
             if followup_mail:
