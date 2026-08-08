@@ -70,7 +70,7 @@
           <td><form method="post" action="{{ url_for('update_case_km', case_id=case.id) }}" class="km-form"><input type="number" step="0.01" min="0" name="distance_from_branch" value="{{ case_km(case) }}" placeholder="KM"><button class="small">Save</button></form></td>
           <td class="row-actions">
             <a class="mini-button" href="{{ url_for('case_detail', case_id=case.id) }}">Open</a>
-            <form method="post" action="{{ url_for('delete_case', case_id=case.id) }}" onsubmit="return confirm('Is case ko MIS aur iski uploaded files/reports se permanently delete karein?');">
+            <form method="post" action="{{ url_for('delete_case', case_id=case.id) }}" onsubmit="return confirm('Sirf SVAI MIS se case aur yahan saved files delete hongi. Gmail/Yahoo mail safe rahega. Delete karein?');">
               <button class="small danger" type="submit">Delete</button>
             </form>
           </td>

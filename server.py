@@ -1045,6 +1045,24 @@ def imap_safe_assignment_folders(account, mail):
     return folders
 
 
+def fetch_mis_message(mail, msg_id):
+    """Fetch enough of a message for MIS parsing without downloading documents.
+
+    The header plus first 256 KB of MIME text comfortably covers normal bank
+    assignment bodies while avoiding multi-megabyte PDFs and site-photo sets.
+    """
+    status, msg_data = mail.fetch(
+        msg_id,
+        "(BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.262144>)",
+    )
+    if status != "OK":
+        return None
+    chunks = [item[1] for item in msg_data if isinstance(item, tuple) and item[1]]
+    if not chunks:
+        return None
+    return b"\r\n".join(chunks)
+
+
 def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
     created = 0
     updated = 0
@@ -1074,10 +1092,7 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 continue
             scanned_folders.append(folder.strip('"'))
             for msg_id in payload[0].split():
-                status, msg_data = mail.fetch(msg_id, "(RFC822)")
-                if status != "OK":
-                    continue
-                raw = next((x[1] for x in msg_data if isinstance(x, tuple)), None)
+                raw = fetch_mis_message(mail, msg_id)
                 if raw:
                     raw_messages.append((msg_id, raw))
             # Gmail All Mail is authoritative and already includes Inbox and
@@ -1096,8 +1111,7 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
             status, payload = mail.search(None, "X-GM-RAW", f'"{gmail_query}"')
             if status == "OK":
                 for msg_id in payload[0].split()[-100:]:
-                    status, msg_data = mail.fetch(msg_id, "(RFC822)")
-                    raw = next((x[1] for x in msg_data if isinstance(x, tuple)), None) if status == "OK" else None
+                    raw = fetch_mis_message(mail, msg_id)
                     if raw:
                         raw_messages.append((msg_id, raw))
         if not scanned_folders:
@@ -1141,34 +1155,10 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 ignored += 1
                 continue
 
-            attachments = collect_email_attachments(message)
-            existing_assets = (
-                FileAsset.query.filter_by(case_id=existing_case.id).all()
-                if existing_case else []
-            )
-            details = enrich_email_details_from_attachments(
-                details,
-                [
-                    (asset.filename, asset.extracted_text or "")
-                    for asset in existing_assets
-                ],
-            )
-            existing_attachment_keys = {
-                (asset.filename.casefold(), len(asset.content or b""))
-                for asset in existing_assets
-            }
-            new_attachment_texts = []
-            for item in attachments:
-                key = (item["filename"].casefold(), len(item["content"]))
-                if key in existing_attachment_keys:
-                    continue
-                new_attachment_texts.append((
-                    item["filename"],
-                    extract_basic_text(item["filename"], item["content"]),
-                ))
-            details = enrich_email_details_from_attachments(
-                details, new_attachment_texts
-            )
+            # Email attachments are intentionally not downloaded or stored.
+            # SVAI email ingestion is MIS-only; report documents can be added
+            # explicitly from the case page when they are actually required.
+            attachments = []
             details.pop("ai_error", None)
             if followup_mail:
                 if existing_case and _message_already_recorded(

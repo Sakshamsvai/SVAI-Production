@@ -42,7 +42,7 @@ from server import (  # noqa: E402
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
     email_fetch_folders,
-    imap_safe_assignment_folders,
+    fetch_mis_message, imap_safe_assignment_folders,
 )
 
 
@@ -619,6 +619,26 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn('"LIFC Assignments"', folders)
         self.assertNotIn('"[Gmail]/Sent Mail"', folders)
         self.assertNotIn("Spam", folders)
+
+    def test_mis_fetch_uses_bounded_message_body_without_attachments(self):
+        class Mailbox:
+            def __init__(self):
+                self.query = ""
+
+            def fetch(self, msg_id, query):
+                self.query = query
+                return "OK", [
+                    (b"header", b"Subject: Technical assignment APP-101\r\nFrom: bank@example.com\r\n"),
+                    (b"body", b"\r\nCustomer Name: Test Customer"),
+                    b")",
+                ]
+
+        mailbox = Mailbox()
+        raw = fetch_mis_message(mailbox, b"1")
+        self.assertIn(b"Technical assignment", raw)
+        self.assertIn(b"Test Customer", raw)
+        self.assertIn("BODY.PEEK[TEXT]<0.262144>", mailbox.query)
+        self.assertNotIn("RFC822", mailbox.query)
 
     def test_email_prefilter_and_regex_extraction(self):
         subject = "Fresh Technical Valuation - APP NO: LAP-2026-0091"
