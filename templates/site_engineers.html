@@ -11,6 +11,20 @@
 </section>
 
 <section class="card">
+  <div class="section-head"><div><h2>Area WhatsApp Groups</h2><p>Group invite link ek baar save karein. Initiate par message copy karke group khulega.</p></div></div>
+  <form method="post" action="{{ url_for('save_whatsapp_group') }}" class="form-grid three">
+    <label>Group Name<input name="name" required placeholder="Jaise Ashta Site Team"></label>
+    <label>Area<input name="area" placeholder="Jaise Ashta"></label>
+    <label>Group Invite Link<input name="invite_url" type="url" required placeholder="https://chat.whatsapp.com/..."></label>
+    <button class="full green">Save WhatsApp Group</button>
+  </form>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Group</th><th>Area</th><th>Status</th><th></th></tr></thead>
+    <tbody>{% for group in whatsapp_groups %}<tr><td><b>{{ group.name }}</b></td><td>{{ group.area or '—' }}</td><td>{{ 'Active' if group.active else 'Removed' }}</td><td>{% if group.active %}<form method="post" action="{{ url_for('delete_whatsapp_group', group_id=group.id) }}"><button class="small danger" data-confirm="Group list se remove karein?">Remove</button></form>{% endif %}</td></tr>{% else %}<tr><td colspan="4" class="empty">Abhi koi WhatsApp group saved nahi hai.</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+
+<section class="card">
   <h2>Saved Engineers</h2>
   <div class="table-wrap"><table>
     <thead><tr><th>Name</th><th>WhatsApp</th><th>Area</th><th>Status</th><th></th></tr></thead>

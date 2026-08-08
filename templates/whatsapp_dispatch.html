@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow">
+  <h1>{{ group.name }} में Visit भेजें</h1>
+  <p>WhatsApp group prefilled message support नहीं करता। नीचे button message copy करके group खोलेगा—फिर WhatsApp में Paste और Send करें।</p>
+  <textarea id="visit-message" rows="14" readonly>{{ message }}</textarea>
+  <div class="actions" style="margin-top:14px">
+    <button type="button" class="green" id="copy-open-group">Copy Message + Open Group</button>
+    <a class="button secondary" href="{{ url_for('dashboard') }}">Back to MIS</a>
+  </div>
+</section>
+<script>
+document.getElementById("copy-open-group").addEventListener("click", async function () {
+  const message = document.getElementById("visit-message").value;
+  try { await navigator.clipboard.writeText(message); }
+  catch (_) { document.getElementById("visit-message").select(); document.execCommand("copy"); }
+  window.location.href = {{ group.invite_url | tojson }};
+});
+</script>
+{% endblock %}

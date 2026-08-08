@@ -71,9 +71,10 @@
           <td class="address" title="{{ case.property_address or '' }}">{{ concise_mis_address(case.property_address) or '—' }}</td>
           <td>
             <form method="post" action="{{ url_for('initiate_visit', case_id=case.id) }}" class="visit-init-form">
-              <select name="engineer_id" aria-label="Visit By for {{ case.application_number or case.id }}" required>
-                <option value="">{{ case.visit_by or 'Select engineer' }}</option>
-                {% for engineer in engineers %}<option value="{{ engineer.id }}">{{ engineer.name }}{% if engineer.area %} · {{ engineer.area }}{% endif %}</option>{% endfor %}
+              <select name="recipient" aria-label="Visit By for {{ case.application_number or case.id }}" required>
+                <option value="">{{ case.visit_by or 'Select engineer/group' }}</option>
+                {% for engineer in engineers %}<option value="engineer:{{ engineer.id }}">👤 {{ engineer.name }}{% if engineer.area %} · {{ engineer.area }}{% endif %}</option>{% endfor %}
+                {% for group in whatsapp_groups %}<option value="group:{{ group.id }}">👥 {{ group.name }}{% if group.area %} · {{ group.area }}{% endif %}</option>{% endfor %}
               </select>
               <button class="small green" type="submit">Initiate WhatsApp</button>
             </form>

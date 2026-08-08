@@ -38,7 +38,7 @@ from ai_service_openai import (  # noqa: E402
 )
 from report_service import fill_docx_template, fill_excel_template  # noqa: E402
 from server import (  # noqa: E402
-    BillingTemplate, EmailAccount, FileAsset, SiteEngineer, User, ValuationCase, app, apply_email_details,
+    BillingTemplate, EmailAccount, FileAsset, SiteEngineer, WhatsAppGroup, User, ValuationCase, app, apply_email_details,
     apply_followup_to_existing_case, db, encrypt_password, is_followup_email,
     existing_case_for_duplicate_assignment, normalized_application_number,
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
@@ -490,7 +490,7 @@ class SvaiSmokeTests(unittest.TestCase):
             db.session.commit()
             engineer_id, case_id = engineer.id, case.id
         response = self.client.post(f"/cases/{case_id}/initiate-visit", data={
-            "_csrf_token": self.csrf(), "engineer_id": str(engineer_id),
+            "_csrf_token": self.csrf(), "recipient": f"engineer:{engineer_id}",
         })
         self.assertEqual(response.status_code, 302)
         location = unquote(response.headers["Location"])
@@ -501,6 +501,25 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertNotIn("svai-valuation-app.onrender.com", location)
         with app.app_context():
             self.assertEqual(db.session.get(ValuationCase, case_id).visit_by, "Nikhil Engineer")
+
+        empty = self.client.post(f"/cases/{case_id}/initiate-visit", data={
+            "_csrf_token": self.csrf(), "recipient": "",
+        })
+        self.assertEqual(empty.status_code, 302)
+
+        saved_group = self.client.post("/whatsapp-groups", data={
+            "_csrf_token": self.csrf(), "name": "Ashta Site Team", "area": "Ashta",
+            "invite_url": "https://chat.whatsapp.com/AbCdEf1234567890",
+        })
+        self.assertEqual(saved_group.status_code, 302)
+        with app.app_context():
+            group_id = WhatsAppGroup.query.filter_by(name="Ashta Site Team").first().id
+        group_page = self.client.post(f"/cases/{case_id}/initiate-visit", data={
+            "_csrf_token": self.csrf(), "recipient": f"group:{group_id}",
+        })
+        self.assertEqual(group_page.status_code, 200)
+        self.assertIn(b"Copy Message + Open Group", group_page.data)
+        self.assertIn(b"Visit Customer", group_page.data)
 
     def test_case_upload_valuation_and_report(self):
         self.login()

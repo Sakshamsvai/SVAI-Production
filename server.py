@@ -142,6 +142,15 @@ class SiteEngineer(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
+class WhatsAppGroup(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(180), nullable=False, index=True)
+    area = db.Column(db.String(180), default="")
+    invite_url = db.Column(db.Text, nullable=False)
+    active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 class ValuationCase(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     application_number = db.Column(db.String(180), index=True)
@@ -2118,6 +2127,7 @@ def dashboard():
         "dashboard.html", cases=cases, stats=stats, search=search,
         include_archived=include_archived, date_from=date_from, date_to=date_to,
         engineers=SiteEngineer.query.filter_by(active=True).order_by(SiteEngineer.name).all(),
+        whatsapp_groups=WhatsAppGroup.query.filter_by(active=True).order_by(WhatsAppGroup.name).all(),
         ai_enabled=ai_enabled(), ai_model=OPENAI_MODEL,
     )
 
@@ -2145,7 +2155,39 @@ def site_engineers():
     return render_template(
         "site_engineers.html",
         engineers=SiteEngineer.query.order_by(SiteEngineer.name).all(),
+        whatsapp_groups=WhatsAppGroup.query.order_by(WhatsAppGroup.name).all(),
     )
+
+
+@app.route("/whatsapp-groups", methods=["POST"])
+@login_required
+def save_whatsapp_group():
+    name = request.form.get("name", "").strip()
+    area = request.form.get("area", "").strip()
+    invite_url = request.form.get("invite_url", "").strip()
+    if not re.fullmatch(r"https://chat\.whatsapp\.com/[A-Za-z0-9_-]+", invite_url):
+        flash("Valid WhatsApp group invite link enter karein.", "error")
+    elif not name:
+        flash("WhatsApp group name enter karein.", "error")
+    else:
+        group = WhatsAppGroup.query.filter_by(invite_url=invite_url).first()
+        if group:
+            group.name, group.area, group.active = name, area, True
+        else:
+            db.session.add(WhatsAppGroup(name=name, area=area, invite_url=invite_url))
+        db.session.commit()
+        flash(f"{name} WhatsApp group saved.", "success")
+    return redirect(url_for("site_engineers"))
+
+
+@app.route("/whatsapp-groups/<int:group_id>/delete", methods=["POST"])
+@login_required
+def delete_whatsapp_group(group_id):
+    group = WhatsAppGroup.query.get_or_404(group_id)
+    group.active = False
+    db.session.commit()
+    flash(f"{group.name} group list se removed.", "success")
+    return redirect(url_for("site_engineers"))
 
 
 @app.route("/site-engineers/<int:engineer_id>/delete", methods=["POST"])
@@ -2162,13 +2204,11 @@ def delete_site_engineer(engineer_id):
 @login_required
 def initiate_visit(case_id):
     case = ValuationCase.query.get_or_404(case_id)
-    engineer_id = request.form.get("engineer_id", "")
-    engineer = SiteEngineer.query.filter_by(id=engineer_id, active=True).first()
-    if not engineer:
-        flash("Pehle saved site engineer select karein.", "error")
+    recipient = request.form.get("recipient", "").strip()
+    kind, separator, raw_id = recipient.partition(":")
+    if not separator or not raw_id.isdigit():
+        flash("Pehle saved engineer ya area group select karein.", "error")
         return redirect(request.referrer or url_for("dashboard"))
-    case.visit_by = engineer.name
-    db.session.commit()
     message = "\n".join([
         "New Site Visit - SVAI",
         f"Customer: {case.customer_name or 'Not available'}",
@@ -2181,7 +2221,26 @@ def initiate_visit(case_id):
         "",
         "Site par photos offline phone camera se lein aur visit ke baad WhatsApp par bhej dein.",
     ])
-    return redirect(f"https://wa.me/{engineer.mobile_number}?text={quote(message)}")
+    if kind == "engineer":
+        engineer = SiteEngineer.query.filter_by(id=int(raw_id), active=True).first()
+        if not engineer:
+            flash("Selected site engineer available nahi hai.", "error")
+            return redirect(url_for("dashboard"))
+        case.visit_by = engineer.name
+        db.session.commit()
+        return redirect(f"https://wa.me/{engineer.mobile_number}?text={quote(message)}")
+    if kind == "group":
+        group = WhatsAppGroup.query.filter_by(id=int(raw_id), active=True).first()
+        if not group:
+            flash("Selected WhatsApp group available nahi hai.", "error")
+            return redirect(url_for("dashboard"))
+        case.visit_by = group.name
+        db.session.commit()
+        return render_template(
+            "whatsapp_dispatch.html", case=case, group=group, message=message
+        )
+    flash("Valid engineer ya WhatsApp group select karein.", "error")
+    return redirect(url_for("dashboard"))
 
 
 @app.route("/mis/import", methods=["POST"])
