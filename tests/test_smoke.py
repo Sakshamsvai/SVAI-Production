@@ -659,6 +659,22 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn(b"Valuation", raw)
         self.assertEqual(mailbox.query, "(RFC822)")
 
+    def test_bounded_fetch_falls_back_for_yahoo_style_imap_error(self):
+        class YahooMailbox:
+            def __init__(self):
+                self.queries = []
+
+            def fetch(self, msg_id, query):
+                self.queries.append(query)
+                if "BODY.PEEK" in query:
+                    raise __import__("imaplib").IMAP4.error("FETCH Bad sequence")
+                return "OK", [(b"full", b"Subject: Yahoo valuation\r\n\r\nBody")]
+
+        mailbox = YahooMailbox()
+        raw = fetch_mis_message(mailbox, b"3")
+        self.assertIn(b"Yahoo valuation", raw)
+        self.assertEqual(mailbox.queries[-1], "(RFC822)")
+
     def test_email_prefilter_and_regex_extraction(self):
         subject = "Fresh Technical Valuation - APP NO: LAP-2026-0091"
         body = (

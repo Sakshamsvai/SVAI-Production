@@ -1059,10 +1059,18 @@ def fetch_mis_message(mail, msg_id):
     The header plus first 256 KB of MIME text comfortably covers normal bank
     assignment bodies while avoiding multi-megabyte PDFs and site-photo sets.
     """
-    status, msg_data = mail.fetch(
-        msg_id,
-        "(BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.262144>)",
-    )
+    try:
+        status, msg_data = mail.fetch(
+            msg_id,
+            "(BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.262144>)",
+        )
+    except imaplib.IMAP4.error:
+        status, msg_data = "BAD", []
+    # Yahoo rejects the bounded multi-part FETCH command on some mailboxes.
+    # Fall back to the widely supported full-message command; attachment bytes
+    # remain temporary and are never stored in SVAI.
+    if status != "OK":
+        status, msg_data = mail.fetch(msg_id, "(RFC822)")
     if status != "OK":
         return None
     chunks = [item[1] for item in msg_data if isinstance(item, tuple) and item[1]]
