@@ -888,11 +888,10 @@ def merge_cross_mailbox_duplicate_cases():
         if not key:
             continue
         if kind in {"subsequent", "revisit", "part / tranche"}:
-            subject_key = normalized_email_subject(case.email_subject)
             received_day = case.email_received_at.date() if case.email_received_at else None
-            if not subject_key or not received_day:
+            if not received_day:
                 continue
-            key = (key, kind, subject_key, received_day)
+            key = (key, kind, received_day)
         else:
             key = (key, "standard")
         groups.setdefault(key, []).append(case)

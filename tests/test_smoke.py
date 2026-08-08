@@ -904,13 +904,26 @@ class SvaiSmokeTests(unittest.TestCase):
                 application_number="SAME-CASE-101", bank_name="Test Bank",
                 case_type="Subsequent", source_email="yahoo@example.com",
             )
-            db.session.add_all([gmail_case, yahoo_case, subsequent])
+            received = __import__("datetime").datetime(2026, 8, 7, 20, 0)
+            part_one = ValuationCase(
+                application_number="PART-REPEAT-101", bank_name="Test Bank",
+                case_type="Part / Tranche", email_subject="Part valuation request",
+                email_received_at=received,
+            )
+            part_two = ValuationCase(
+                application_number="PART REPEAT 101", bank_name="Test Bank",
+                case_type="Part / Tranche", email_subject="FW: Tranche release",
+                email_received_at=received.replace(minute=15),
+            )
+            db.session.add_all([gmail_case, yahoo_case, subsequent, part_one, part_two])
             db.session.commit()
-            self.assertEqual(merge_cross_mailbox_duplicate_cases(), 1)
+            self.assertEqual(merge_cross_mailbox_duplicate_cases(), 2)
             self.assertFalse(gmail_case.archived)
             self.assertTrue(yahoo_case.archived)
             self.assertEqual(gmail_case.contact_number, "9999999999")
             self.assertFalse(subsequent.archived)
+            self.assertFalse(part_one.archived)
+            self.assertTrue(part_two.archived)
 
     def test_followup_report_request_updates_existing_case_without_new_mis_row(self):
         with app.app_context():
