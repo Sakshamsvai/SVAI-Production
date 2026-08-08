@@ -7,6 +7,7 @@ import secrets
 import imaplib
 import smtplib
 import time
+import threading
 import email as email_lib
 import zipfile
 from datetime import date, datetime, timedelta
@@ -68,11 +69,18 @@ elif database_url.startswith("postgresql://"):
     )
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+if database_url.startswith("postgresql+"):
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "pool_pre_ping": True,
+        "pool_recycle": 280,
+    }
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_MB", "50")) * 1024 * 1024
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
 db = SQLAlchemy(app)
+_setup_lock = threading.Lock()
+_runtime_setup_done = None
 
 DOCUMENT_EXTENSIONS = {
     ".pdf", ".jpg", ".jpeg", ".png", ".webp", ".docx", ".xlsx"
@@ -1574,44 +1582,50 @@ def template_security():
 
 @app.before_request
 def ensure_setup():
-    db.create_all()
+    global _runtime_setup_done
     admin_email = os.getenv("ADMIN_EMAIL", "sakshamvaluer@yahoo.com").lower()
-    admin_password = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
-    if not User.query.filter_by(email=admin_email).first():
-        db.session.add(User(
-            email=admin_email,
-            password_hash=generate_password_hash(admin_password),
-            name="Saksham Associate Admin",
-            role="admin",
-        ))
-        db.session.commit()
-    if SEED_TEMPLATES_DIR.exists():
-        seeds = {
-            "DCB.xlsx": "DCB Bank",
-            "SBFC.xlsx": "SBFC Finance",
-            "Laxmi India.xlsx": "Laxmi India Finance",
-            "Ummeed.docx": "Ummeed Housing Finance",
-        }
-        added = False
-        for filename, bank_name in seeds.items():
-            source = SEED_TEMPLATES_DIR / filename
-            if not source.exists():
-                continue
-            exists = FileAsset.query.filter_by(asset_type="template", filename=filename).first()
-            if exists:
-                continue
-            mime_type = (
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                if source.suffix.lower() == ".docx"
-                else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            db.session.add(FileAsset(
-                asset_type="template", category=bank_name, filename=filename,
-                mime_type=mime_type, content=source.read_bytes(),
+    if _runtime_setup_done == admin_email:
+        return
+    with _setup_lock:
+        if _runtime_setup_done == admin_email:
+            return
+        admin_password = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
+        if not User.query.filter_by(email=admin_email).first():
+            db.session.add(User(
+                email=admin_email,
+                password_hash=generate_password_hash(admin_password),
+                name="Saksham Associate Admin",
+                role="admin",
             ))
-            added = True
-        if added:
             db.session.commit()
+        if SEED_TEMPLATES_DIR.exists():
+            seeds = {
+                "DCB.xlsx": "DCB Bank",
+                "SBFC.xlsx": "SBFC Finance",
+                "Laxmi India.xlsx": "Laxmi India Finance",
+                "Ummeed.docx": "Ummeed Housing Finance",
+            }
+            added = False
+            for filename, bank_name in seeds.items():
+                source = SEED_TEMPLATES_DIR / filename
+                if not source.exists():
+                    continue
+                exists = FileAsset.query.filter_by(asset_type="template", filename=filename).first()
+                if exists:
+                    continue
+                mime_type = (
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    if source.suffix.lower() == ".docx"
+                    else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+                db.session.add(FileAsset(
+                    asset_type="template", category=bank_name, filename=filename,
+                    mime_type=mime_type, content=source.read_bytes(),
+                ))
+                added = True
+            if added:
+                db.session.commit()
+        _runtime_setup_done = admin_email
 
 
 @app.route("/health")
