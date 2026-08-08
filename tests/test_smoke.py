@@ -111,6 +111,13 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn(b"Dashboard / MIS", response.data)
         self.assertIn(b"Process All Files", response.data)
 
+    def test_dashboard_announces_one_minute_auto_refresh(self):
+        self.login()
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Auto fetch + refresh: every 1 minute", response.data)
+        self.assertIn(b"60000", response.data)
+
     def test_billing_fills_existing_invoice_table_with_km_slab_amount(self):
         workbook = Workbook()
         sheet = workbook.active

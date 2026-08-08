@@ -3079,9 +3079,19 @@ def change_password():
 
 def scheduled_email_fetch():
     with app.app_context():
+        month_start, today = current_month_range()
         for account in EmailAccount.query.filter_by(active=True).all():
             try:
-                fetch_email_account(account)
+                # First automatic run covers the month. Later runs overlap the
+                # previous fetch by one day so delayed/late-indexed mail is not
+                # missed while keeping every-minute scans small and fast.
+                start_date = month_start
+                if account.last_fetch_at:
+                    start_date = max(
+                        month_start,
+                        account.last_fetch_at.date() - timedelta(days=1),
+                    )
+                fetch_email_account(account, start_date, today)
             except Exception as exc:
                 app.logger.warning("Scheduled email fetch failed for %s: %s", account.email, exc)
 
@@ -3092,8 +3102,16 @@ def start_scheduler():
     if os.getenv("ENABLE_EMAIL_SCHEDULER", "false").lower() != "true":
         return
     scheduler = BackgroundScheduler(daemon=True)
-    minutes = max(5, int(os.getenv("EMAIL_FETCH_MINUTES", "10")))
-    scheduler.add_job(scheduled_email_fetch, "interval", minutes=minutes, id="email_fetch", replace_existing=True)
+    minutes = max(1, int(os.getenv("EMAIL_FETCH_MINUTES", "1")))
+    scheduler.add_job(
+        scheduled_email_fetch,
+        "interval",
+        minutes=minutes,
+        id="email_fetch",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
 
 
