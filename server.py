@@ -16,6 +16,7 @@ from functools import wraps
 from html import unescape
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from cryptography.fernet import Fernet
@@ -129,6 +130,15 @@ class EmailAccount(db.Model):
     bank_name = db.Column(db.String(180))
     active = db.Column(db.Boolean, default=True)
     last_fetch_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class SiteEngineer(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(180), nullable=False, index=True)
+    mobile_number = db.Column(db.String(20), nullable=False)
+    area = db.Column(db.String(180), default="")
+    active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
@@ -2107,8 +2117,71 @@ def dashboard():
     return render_template(
         "dashboard.html", cases=cases, stats=stats, search=search,
         include_archived=include_archived, date_from=date_from, date_to=date_to,
+        engineers=SiteEngineer.query.filter_by(active=True).order_by(SiteEngineer.name).all(),
         ai_enabled=ai_enabled(), ai_model=OPENAI_MODEL,
     )
+
+
+@app.route("/site-engineers", methods=["GET", "POST"])
+@login_required
+def site_engineers():
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        mobile = re.sub(r"\D", "", request.form.get("mobile_number", ""))
+        area = request.form.get("area", "").strip()
+        if len(mobile) == 10:
+            mobile = "91" + mobile
+        if not name or not 11 <= len(mobile) <= 15:
+            flash("Engineer name aur valid WhatsApp number enter karein.", "error")
+        else:
+            engineer = SiteEngineer.query.filter_by(mobile_number=mobile).first()
+            if engineer:
+                engineer.name, engineer.area, engineer.active = name, area, True
+            else:
+                db.session.add(SiteEngineer(name=name, mobile_number=mobile, area=area))
+            db.session.commit()
+            flash(f"{name} site engineer saved.", "success")
+        return redirect(url_for("site_engineers"))
+    return render_template(
+        "site_engineers.html",
+        engineers=SiteEngineer.query.order_by(SiteEngineer.name).all(),
+    )
+
+
+@app.route("/site-engineers/<int:engineer_id>/delete", methods=["POST"])
+@login_required
+def delete_site_engineer(engineer_id):
+    engineer = SiteEngineer.query.get_or_404(engineer_id)
+    engineer.active = False
+    db.session.commit()
+    flash(f"{engineer.name} engineer list se removed.", "success")
+    return redirect(url_for("site_engineers"))
+
+
+@app.route("/cases/<int:case_id>/initiate-visit", methods=["POST"])
+@login_required
+def initiate_visit(case_id):
+    case = ValuationCase.query.get_or_404(case_id)
+    engineer_id = request.form.get("engineer_id", "")
+    engineer = SiteEngineer.query.filter_by(id=engineer_id, active=True).first()
+    if not engineer:
+        flash("Pehle saved site engineer select karein.", "error")
+        return redirect(request.referrer or url_for("dashboard"))
+    case.visit_by = engineer.name
+    db.session.commit()
+    message = "\n".join([
+        "New Site Visit - SVAI",
+        f"Customer: {case.customer_name or 'Not available'}",
+        f"Customer Mobile: {case.contact_number or 'Not available'}",
+        f"Application No: {case.application_number or 'Not available'}",
+        f"Bank: {case.bank_name or 'Not available'}",
+        f"Case Type: {case.case_type or 'Not available'}",
+        f"Address: {concise_mis_address(case.property_address) or 'Not available'}",
+        f"Branch: {case.branch_name or 'Not available'}",
+        "",
+        "Site par photos offline phone camera se lein aur visit ke baad WhatsApp par bhej dein.",
+    ])
+    return redirect(f"https://wa.me/{engineer.mobile_number}?text={quote(message)}")
 
 
 @app.route("/mis/import", methods=["POST"])

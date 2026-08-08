@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <div class="section-head"><div><h1>Site Engineers</h1><p>Name aur WhatsApp number ek baar save karein. Case ka link message mein nahi bheja jayega.</p></div></div>
+  <form method="post" class="form-grid three">
+    <label>Engineer Name<input name="name" required placeholder="Jaise Nikhil"></label>
+    <label>WhatsApp Number<input name="mobile_number" required inputmode="numeric" placeholder="10 digit mobile number"></label>
+    <label>Area / Branch<input name="area" placeholder="Jaise Vidisha"></label>
+    <button class="full green">Save Site Engineer</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Saved Engineers</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Name</th><th>WhatsApp</th><th>Area</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {% for engineer in engineers %}
+      <tr><td><b>{{ engineer.name }}</b></td><td>{{ engineer.mobile_number }}</td><td>{{ engineer.area or '—' }}</td><td>{{ 'Active' if engineer.active else 'Removed' }}</td><td>{% if engineer.active %}<form method="post" action="{{ url_for('delete_site_engineer', engineer_id=engineer.id) }}"><button class="small danger" data-confirm="Engineer list se remove karein?">Remove</button></form>{% endif %}</td></tr>
+    {% else %}<tr><td colspan="5" class="empty">Abhi koi engineer saved nahi hai.</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endblock %}

@@ -8,6 +8,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import unquote
 
 from docx import Document
 from openpyxl import Workbook, load_workbook
@@ -37,7 +38,7 @@ from ai_service_openai import (  # noqa: E402
 )
 from report_service import fill_docx_template, fill_excel_template  # noqa: E402
 from server import (  # noqa: E402
-    BillingTemplate, EmailAccount, FileAsset, User, ValuationCase, app, apply_email_details,
+    BillingTemplate, EmailAccount, FileAsset, SiteEngineer, User, ValuationCase, app, apply_email_details,
     apply_followup_to_existing_case, db, encrypt_password, is_followup_email,
     existing_case_for_duplicate_assignment, normalized_application_number,
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
@@ -101,7 +102,7 @@ class SvaiSmokeTests(unittest.TestCase):
 
     def test_primary_pages_render(self):
         self.login()
-        for path in ["/", "/email-accounts", "/templates", "/billing", "/settings"]:
+        for path in ["/", "/email-accounts", "/site-engineers", "/templates", "/billing", "/settings"]:
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, path)
             self.assertIn(b"Dashboard / MIS", response.data)
@@ -468,6 +469,38 @@ class SvaiSmokeTests(unittest.TestCase):
 
     def test_csrf_rejects_missing_token(self):
         self.assertEqual(self.client.post("/login", data={}).status_code, 400)
+
+    def test_saved_engineer_initiates_offline_whatsapp_visit_without_case_link(self):
+        self.login()
+        response = self.client.post("/site-engineers", data={
+            "_csrf_token": self.csrf(), "name": "Nikhil Engineer",
+            "mobile_number": "9876543210", "area": "Vidisha",
+        })
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            engineer = SiteEngineer.query.filter_by(name="Nikhil Engineer").first()
+            case = ValuationCase(
+                application_number="VISIT-101", customer_name="Visit Customer",
+                contact_number="9999999999", bank_name="Test Bank",
+                case_type="Fresh", property_address=(
+                    "Plot 12, Village Hasuya, Tehsil Vidisha, Dist- Vidisha"
+                ), branch_name="Vidisha",
+            )
+            db.session.add(case)
+            db.session.commit()
+            engineer_id, case_id = engineer.id, case.id
+        response = self.client.post(f"/cases/{case_id}/initiate-visit", data={
+            "_csrf_token": self.csrf(), "engineer_id": str(engineer_id),
+        })
+        self.assertEqual(response.status_code, 302)
+        location = unquote(response.headers["Location"])
+        self.assertIn("https://wa.me/919876543210?text=", location)
+        self.assertIn("Visit Customer", location)
+        self.assertIn("Village Hasuya, Tehsil Vidisha, Dist- Vidisha", location)
+        self.assertIn("photos offline phone camera", location)
+        self.assertNotIn("svai-valuation-app.onrender.com", location)
+        with app.app_context():
+            self.assertEqual(db.session.get(ValuationCase, case_id).visit_by, "Nikhil Engineer")
 
     def test_case_upload_valuation_and_report(self):
         self.login()

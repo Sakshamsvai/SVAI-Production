@@ -69,7 +69,15 @@
           <td>{{ case.bank_name or '—' }}</td>
           <td><span class="pill">{{ case.status }}</span><br><small>{{ mailbox_source(case) }}</small></td>
           <td class="address" title="{{ case.property_address or '' }}">{{ concise_mis_address(case.property_address) or '—' }}</td>
-          <td>{{ case.visit_by or '—' }}</td>
+          <td>
+            <form method="post" action="{{ url_for('initiate_visit', case_id=case.id) }}" class="visit-init-form">
+              <select name="engineer_id" aria-label="Visit By for {{ case.application_number or case.id }}" required>
+                <option value="">{{ case.visit_by or 'Select engineer' }}</option>
+                {% for engineer in engineers %}<option value="{{ engineer.id }}">{{ engineer.name }}{% if engineer.area %} · {{ engineer.area }}{% endif %}</option>{% endfor %}
+              </select>
+              <button class="small green" type="submit">Initiate WhatsApp</button>
+            </form>
+          </td>
           <td>{{ case.branch_name or '—' }}</td>
           <td><form method="post" action="{{ url_for('update_case_km', case_id=case.id) }}" class="km-form"><input type="number" step="0.01" min="0" name="distance_from_branch" value="{{ case_km(case) }}" placeholder="KM"><button class="small">Save</button></form></td>
           <td class="row-actions">
