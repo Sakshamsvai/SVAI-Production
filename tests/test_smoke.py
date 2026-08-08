@@ -497,7 +497,7 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn("https://wa.me/919876543210?text=", location)
         self.assertIn("Visit Customer", location)
         self.assertIn("Village Hasuya, Tehsil Vidisha, Dist- Vidisha", location)
-        self.assertIn("photos offline phone camera", location)
+        self.assertNotIn("photos offline phone camera", location)
         self.assertNotIn("svai-valuation-app.onrender.com", location)
         with app.app_context():
             self.assertEqual(db.session.get(ValuationCase, case_id).visit_by, "Nikhil Engineer")
@@ -518,8 +518,10 @@ class SvaiSmokeTests(unittest.TestCase):
             "_csrf_token": self.csrf(), "recipient": f"group:{group_id}",
         })
         self.assertEqual(group_page.status_code, 200)
-        self.assertIn(b"Copy Message + Open Group", group_page.data)
+        self.assertIn(b"Open WhatsApp", group_page.data)
+        self.assertIn(b"No Copy/Paste", group_page.data)
         self.assertIn(b"Visit Customer", group_page.data)
+        self.assertNotIn(b"photos offline phone camera", group_page.data)
         self.assertEqual(
             normalize_whatsapp_group_link(
                 "https://chat.whatsapp.com/CZiTfIiZlEYCkBK8y7pyTa?s=sw&p=i&ilr=0"

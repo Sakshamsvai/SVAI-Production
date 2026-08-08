@@ -2234,8 +2234,6 @@ def initiate_visit(case_id):
         f"Case Type: {case.case_type or 'Not available'}",
         f"Address: {concise_mis_address(case.property_address) or 'Not available'}",
         f"Branch: {case.branch_name or 'Not available'}",
-        "",
-        "Site par photos offline phone camera se lein aur visit ke baad WhatsApp par bhej dein.",
     ])
     if kind == "engineer":
         engineer = SiteEngineer.query.filter_by(id=int(raw_id), active=True).first()
@@ -2253,7 +2251,8 @@ def initiate_visit(case_id):
         case.visit_by = group.name
         db.session.commit()
         return render_template(
-            "whatsapp_dispatch.html", case=case, group=group, message=message
+            "whatsapp_dispatch.html", case=case, group=group, message=message,
+            share_url=f"https://wa.me/?text={quote(message)}",
         )
     flash("Valid engineer ya WhatsApp group select karein.", "error")
     return redirect(url_for("dashboard"))
