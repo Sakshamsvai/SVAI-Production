@@ -44,7 +44,7 @@ from server import (  # noqa: E402
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
     email_fetch_folders, mis_import_rows,
-    concise_mis_address, mailbox_source,
+    concise_mis_address, mailbox_source, normalize_whatsapp_group_link,
     fetch_full_message, fetch_mis_message, imap_safe_assignment_folders,
 )
 
@@ -509,7 +509,7 @@ class SvaiSmokeTests(unittest.TestCase):
 
         saved_group = self.client.post("/whatsapp-groups", data={
             "_csrf_token": self.csrf(), "name": "Ashta Site Team", "area": "Ashta",
-            "invite_url": "https://chat.whatsapp.com/AbCdEf1234567890",
+            "invite_url": "https://chat.whatsapp.com/AbCdEf1234567890?s=sw&p=i&ilr=0",
         })
         self.assertEqual(saved_group.status_code, 302)
         with app.app_context():
@@ -520,6 +520,12 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(group_page.status_code, 200)
         self.assertIn(b"Copy Message + Open Group", group_page.data)
         self.assertIn(b"Visit Customer", group_page.data)
+        self.assertEqual(
+            normalize_whatsapp_group_link(
+                "https://chat.whatsapp.com/CZiTfIiZlEYCkBK8y7pyTa?s=sw&p=i&ilr=0"
+            ),
+            "https://chat.whatsapp.com/CZiTfIiZlEYCkBK8y7pyTa",
+        )
 
     def test_case_upload_valuation_and_report(self):
         self.login()

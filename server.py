@@ -16,7 +16,7 @@ from functools import wraps
 from html import unescape
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
 from cryptography.fernet import Fernet
@@ -1017,6 +1017,22 @@ def concise_mis_address(value, limit=150):
     if len(text) > limit:
         text = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;-") + "…"
     return text
+
+
+def normalize_whatsapp_group_link(value):
+    raw = str(value or "").strip()
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return ""
+    token = parsed.path.strip("/")
+    if (
+        parsed.scheme.casefold() == "https"
+        and parsed.netloc.casefold() == "chat.whatsapp.com"
+        and re.fullmatch(r"[A-Za-z0-9_-]{10,100}", token)
+    ):
+        return f"https://chat.whatsapp.com/{token}"
+    return ""
 
 
 def apply_email_details(case, details, account, subject, received, unique_id):
@@ -2164,8 +2180,8 @@ def site_engineers():
 def save_whatsapp_group():
     name = request.form.get("name", "").strip()
     area = request.form.get("area", "").strip()
-    invite_url = request.form.get("invite_url", "").strip()
-    if not re.fullmatch(r"https://chat\.whatsapp\.com/[A-Za-z0-9_-]+", invite_url):
+    invite_url = normalize_whatsapp_group_link(request.form.get("invite_url", ""))
+    if not invite_url:
         flash("Valid WhatsApp group invite link enter karein.", "error")
     elif not name:
         flash("WhatsApp group name enter karein.", "error")
