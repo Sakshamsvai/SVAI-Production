@@ -762,6 +762,49 @@ class SvaiSmokeTests(unittest.TestCase):
             self.assertIsNone(db.session.get(ValuationCase, case_id))
             self.assertEqual(FileAsset.query.filter_by(case_id=case_id).count(), 0)
 
+    def test_email_document_cleanup_preserves_mis_and_manual_case_files(self):
+        with app.app_context():
+            email_case = ValuationCase(
+                application_number="EMAIL-DOC-1", source_email="valuer@gmail.com",
+            )
+            manual_case = ValuationCase(application_number="MANUAL-DOC-1")
+            db.session.add_all([email_case, manual_case])
+            db.session.commit()
+            db.session.add_all([
+                FileAsset(
+                    case_id=email_case.id, asset_type="document",
+                    filename="email.pdf", content=b"email-document",
+                ),
+                FileAsset(
+                    case_id=email_case.id, asset_type="report",
+                    filename="report.pdf", content=b"report",
+                ),
+                FileAsset(
+                    case_id=manual_case.id, asset_type="document",
+                    filename="manual.pdf", content=b"manual-document",
+                ),
+            ])
+            db.session.commit()
+            email_case_id = email_case.id
+            manual_case_id = manual_case.id
+        self.login()
+        response = self.client.post(
+            "/settings/cleanup-email-documents",
+            data={"_csrf_token": self.csrf()},
+        )
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            self.assertIsNotNone(db.session.get(ValuationCase, email_case_id))
+            self.assertEqual(FileAsset.query.filter_by(
+                case_id=email_case_id, asset_type="document"
+            ).count(), 0)
+            self.assertEqual(FileAsset.query.filter_by(
+                case_id=email_case_id, asset_type="report"
+            ).count(), 1)
+            self.assertEqual(FileAsset.query.filter_by(
+                case_id=manual_case_id, asset_type="document"
+            ).count(), 1)
+
     def test_cross_mailbox_same_application_merges_to_one_active_mis_case(self):
         with app.app_context():
             gmail_case = ValuationCase(

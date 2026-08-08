@@ -1888,12 +1888,48 @@ def settings_page():
             flash("Koi nayi setting enter nahi ki gayi.", "error")
         return redirect(url_for("settings_page"))
 
+    email_case_ids = db.session.query(ValuationCase.id).filter(
+        ValuationCase.source_email.isnot(None)
+    )
+    email_document_count, email_document_bytes = db.session.query(
+        db.func.count(FileAsset.id),
+        db.func.coalesce(db.func.sum(db.func.length(FileAsset.content)), 0),
+    ).filter(
+        FileAsset.asset_type == "document",
+        FileAsset.case_id.in_(email_case_ids),
+    ).one()
     return render_template(
         "settings.html",
         ai_enabled=ai_enabled(),
         ai_model=OPENAI_MODEL,
         document_ai_enabled=document_ai_enabled(),
+        email_document_count=email_document_count,
+        email_document_mb=float(email_document_bytes or 0) / (1024 * 1024),
     )
+
+
+@app.route("/settings/cleanup-email-documents", methods=["POST"])
+@login_required
+def cleanup_email_documents():
+    email_case_ids = db.session.query(ValuationCase.id).filter(
+        ValuationCase.source_email.isnot(None)
+    )
+    documents = FileAsset.query.filter(
+        FileAsset.asset_type == "document",
+        FileAsset.case_id.in_(email_case_ids),
+    ).all()
+    total_bytes = sum(len(item.content or b"") for item in documents)
+    count = len(documents)
+    for item in documents:
+        db.session.delete(item)
+    db.session.commit()
+    flash(
+        f"{count} email-case document(s) delete hue; "
+        f"lagbhag {total_bytes / (1024 * 1024):.1f} MB database space free hui. "
+        "Gmail/Yahoo mails aur MIS cases safe hain.",
+        "success",
+    )
+    return redirect(url_for("settings_page"))
 
 
 def filter_cases_by_dates(query, start_date, end_date):

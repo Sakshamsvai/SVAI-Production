@@ -55,4 +55,19 @@
     <button type="submit">Save Settings</button>
   </form>
 </section>
+
+<section class="card">
+  <h2>Email Document Storage</h2>
+  <p>
+    Email-linked cases ke <strong>{{ email_document_count|default(0) }}</strong> stored document(s)
+    lagbhag <strong>{{ "%.1f"|format(email_document_mb|default(0)) }} MB</strong> space le rahe hain.
+  </p>
+  <p class="note">
+    Cleanup sirf SVAI database ke email-case documents hatata hai. Gmail/Yahoo mail,
+    MIS cases, reports, templates, site photos aur visit data delete nahi hote.
+  </p>
+  <form method="post" action="{{ url_for('cleanup_email_documents') }}" onsubmit="return confirm('SVAI me stored email-case documents permanently delete karein? Gmail/Yahoo mails aur MIS safe rahenge.');">
+    <button class="danger" type="submit">Remove Stored Email Documents</button>
+  </form>
+</section>
 {% endblock %}
