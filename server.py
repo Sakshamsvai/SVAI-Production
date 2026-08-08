@@ -3094,18 +3094,22 @@ def change_password():
 def scheduled_email_fetch():
     with app.app_context():
         month_start, today = current_month_range()
+        full_catchup = datetime.now(APP_TIMEZONE).minute == 0
         for account in EmailAccount.query.filter_by(active=True).all():
             try:
-                # First automatic run covers the month. Later runs overlap the
-                # previous fetch by one day so delayed/late-indexed mail is not
-                # missed while keeping every-minute scans small and fast.
-                start_date = month_start
-                if account.last_fetch_at:
-                    start_date = max(
-                        month_start,
-                        account.last_fetch_at.date() - timedelta(days=1),
-                    )
-                fetch_email_account(account, start_date, today)
+                # Every-minute runs scan today for a fast live MIS. At the top
+                # of every hour, scan the whole month as a catch-up so delayed
+                # indexing or service sleep cannot leave a valuation mail out.
+                start_date = month_start if full_catchup else today
+                result = fetch_email_account(account, start_date, today)
+                app.logger.info(
+                    "Scheduled MIS fetch completed for %s (%s to %s): %s new, %s updated",
+                    account.email,
+                    start_date,
+                    today,
+                    result.get("created", 0),
+                    result.get("updated", 0),
+                )
             except Exception as exc:
                 app.logger.warning("Scheduled email fetch failed for %s: %s", account.email, exc)
 

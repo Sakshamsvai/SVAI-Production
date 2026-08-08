@@ -116,6 +116,7 @@ class SvaiSmokeTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Auto fetch + refresh: every 1 minute", response.data)
+        self.assertIn(b"monthly catch-up: hourly", response.data)
         self.assertIn(b"60000", response.data)
 
     def test_billing_fills_existing_invoice_table_with_km_slab_amount(self):
