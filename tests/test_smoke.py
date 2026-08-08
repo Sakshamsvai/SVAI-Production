@@ -489,6 +489,8 @@ class SvaiSmokeTests(unittest.TestCase):
             db.session.add(case)
             db.session.commit()
             engineer_id, case_id = engineer.id, case.id
+        dashboard = self.client.get("/")
+        self.assertIn(b'target="_blank"', dashboard.data)
         response = self.client.post(f"/cases/{case_id}/initiate-visit", data={
             "_csrf_token": self.csrf(), "recipient": f"engineer:{engineer_id}",
         })

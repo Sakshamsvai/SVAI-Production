@@ -70,7 +70,7 @@
           <td><span class="pill">{{ case.status }}</span><br><small>{{ mailbox_source(case) }}</small></td>
           <td class="address" title="{{ case.property_address or '' }}">{{ concise_mis_address(case.property_address) or '—' }}</td>
           <td>
-            <form method="post" action="{{ url_for('initiate_visit', case_id=case.id) }}" class="visit-init-form">
+            <form method="post" action="{{ url_for('initiate_visit', case_id=case.id) }}" class="visit-init-form" target="_blank">
               <select name="recipient" aria-label="Visit By for {{ case.application_number or case.id }}" required>
                 <option value="">{{ case.visit_by or 'Select engineer/group' }}</option>
                 {% for engineer in engineers %}<option value="engineer:{{ engineer.id }}">👤 {{ engineer.name }}{% if engineer.area %} · {{ engineer.area }}{% endif %}</option>{% endfor %}
