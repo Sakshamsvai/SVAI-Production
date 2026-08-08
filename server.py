@@ -1063,6 +1063,36 @@ def fetch_mis_message(mail, msg_id):
     return b"\r\n".join(chunks)
 
 
+def fetch_full_message(mail, msg_id):
+    """Fetch a full message only when a missing MIS address needs documents."""
+    status, msg_data = mail.fetch(msg_id, "(RFC822)")
+    if status != "OK":
+        return None
+    return next(
+        (item[1] for item in msg_data if isinstance(item, tuple) and item[1]),
+        None,
+    )
+
+
+def enrich_missing_address_from_email_document(details, mail, msg_id):
+    """Read supported documents temporarily; never save them as FileAssets."""
+    if (details.get("property_address") or "").strip():
+        return details
+    raw = fetch_full_message(mail, msg_id)
+    if not raw:
+        return details
+    message = email_lib.message_from_bytes(raw)
+    readable = []
+    for item in collect_email_attachments(message):
+        extension = Path(item["filename"]).suffix.casefold()
+        if extension not in {".pdf", ".docx", ".xlsx", ".xlsm"}:
+            continue
+        text = extract_basic_text(item["filename"], item["content"])
+        if text:
+            readable.append((item["filename"], text))
+    return enrich_email_details_from_attachments(details, readable)
+
+
 def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
     created = 0
     updated = 0
@@ -1155,9 +1185,13 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 ignored += 1
                 continue
 
-            # Email attachments are intentionally not downloaded or stored.
-            # SVAI email ingestion is MIS-only; report documents can be added
-            # explicitly from the case page when they are actually required.
+            # Stay fast for normal mail. Only when the address is absent, read
+            # supported documents temporarily and discard their bytes after
+            # extracting MIS text. Nothing is saved as a FileAsset.
+            if details.get("is_valuation", False) and not followup_mail:
+                details = enrich_missing_address_from_email_document(
+                    details, mail, msg_id
+                )
             attachments = []
             details.pop("ai_error", None)
             if followup_mail:

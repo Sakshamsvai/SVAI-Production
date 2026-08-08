@@ -42,7 +42,7 @@ from server import (  # noqa: E402
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
     email_fetch_folders,
-    fetch_mis_message, imap_safe_assignment_folders,
+    fetch_full_message, fetch_mis_message, imap_safe_assignment_folders,
 )
 
 
@@ -639,6 +639,17 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn(b"Test Customer", raw)
         self.assertIn("BODY.PEEK[TEXT]<0.262144>", mailbox.query)
         self.assertNotIn("RFC822", mailbox.query)
+
+    def test_full_email_is_available_only_for_missing_address_fallback(self):
+        class Mailbox:
+            def fetch(self, msg_id, query):
+                self.query = query
+                return "OK", [(b"full", b"Subject: Valuation\r\n\r\nBody")]
+
+        mailbox = Mailbox()
+        raw = fetch_full_message(mailbox, b"2")
+        self.assertIn(b"Valuation", raw)
+        self.assertEqual(mailbox.query, "(RFC822)")
 
     def test_email_prefilter_and_regex_extraction(self):
         subject = "Fresh Technical Valuation - APP NO: LAP-2026-0091"
