@@ -426,6 +426,10 @@ def deterministic_email_candidate(subject, body, sender=""):
     property_identity = any(term in text for term in (
         "property address", "site address", "collateral address",
     ))
+    known_bank_signal = any(
+        token in re.sub(r"[^a-z0-9]", "", text)
+        for token in BANK_DOMAIN_NAMES
+    )
     strong_assignment = (
         assignment_hits > 0 or subject_structure or structured_task
         or (identifiers and action_hits > 0)
@@ -442,6 +446,15 @@ def deterministic_email_candidate(subject, body, sender=""):
             structured_task or subject_structure
             or (assignment_hits > 0 and (identifiers or property_identity))
             or (identifiers and action_hits > 0)
+            # Bank staff sometimes forward a structured assignment through the
+            # firm's shared Gmail/Yahoo inbox.  Requiring both a labelled case
+            # identifier and property/bank evidence keeps ordinary public-mail
+            # conversations out while retaining genuine MIS initiations.
+            or (
+                identifiers
+                and (property_identity or known_bank_signal)
+                and (action_hits > 0 or case_hits > 0)
+            )
         )
     return True
 

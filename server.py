@@ -1064,6 +1064,8 @@ def apply_email_details(case, details, account, subject, received, unique_id):
     email_managed_statuses = {
         "", "New", "New - Email", "Email Parsed - Review",
         "Correction Pending", "Portal Pending",
+        "Ignored - Not Valuation Email",
+        "Ignored - Follow-up Without Initiation",
     }
     if not existing_row or (case.status or "") in email_managed_statuses:
         case.status = email_case_status(details)
@@ -1312,18 +1314,20 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 account, unique_id, subject, received
             )
             if not is_valuation_email(subject, body, sender) and not followup_mail:
-                if existing_case and existing_case.source_email:
-                    existing_case.archived = True
-                    existing_case.status = "Ignored - Not Valuation Email"
+                # A repeat fetch must never make an already reviewed/accepted
+                # MIS row disappear merely because a later parser version is
+                # stricter.  New rejected messages are still ignored, and an
+                # already archived rejection stays archived for review.
+                if existing_case and existing_case.source_email and not existing_case.archived:
+                    existing_case.updated_at = datetime.utcnow()
                     db.session.commit()
                 ignored += 1
                 continue
 
             details = ai_extract_email(subject, body, sender)
             if not details.get("is_valuation", False) and not followup_mail:
-                if existing_case and existing_case.source_email:
-                    existing_case.archived = True
-                    existing_case.status = "Ignored - Not Valuation Email"
+                if existing_case and existing_case.source_email and not existing_case.archived:
+                    existing_case.updated_at = datetime.utcnow()
                     db.session.commit()
                 ignored += 1
                 continue

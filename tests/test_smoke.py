@@ -1101,6 +1101,52 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertFalse(public_mail_trail["is_valuation"])
         self.assertEqual(public_mail_trail["bank_name"], "")
 
+        forwarded_structured_assignment = regex_email_extract(
+            "Technical case assignment - AYE-000003928097-LOS",
+            "Application No: AYE-000003928097-LOS\n"
+            "Applicant: JAGDISH\nCase Type: LAP\n"
+            "Property Address: Village Mendori, Bhopal\n"
+            "Branch Name: Karond",
+            "bank.team@gmail.com",
+        )
+        self.assertTrue(forwarded_structured_assignment["is_valuation"])
+        self.assertEqual(
+            forwarded_structured_assignment["application_number"],
+            "AYE-000003928097-LOS",
+        )
+
+    def test_refetch_recovers_a_previously_rejected_assignment(self):
+        with app.app_context():
+            account = EmailAccount.query.first()
+            case = ValuationCase(
+                application_number="AYE-000003928097-LOS",
+                customer_name="JAGDISH",
+                status="Ignored - Not Valuation Email",
+                archived=True,
+                source_email=account.email,
+                source_message_id="<rejected-assignment@example.test>",
+                email_subject="Technical case assignment",
+            )
+            db.session.add(case)
+            db.session.commit()
+            apply_email_details(
+                case,
+                {
+                    "is_valuation": True,
+                    "application_number": "AYE-000003928097-LOS",
+                    "customer_name": "JAGDISH",
+                    "case_type": "LAP",
+                    "property_address": "Village Mendori, Bhopal",
+                },
+                account,
+                case.email_subject,
+                datetime(2026, 8, 10, 6, 5),
+                case.source_message_id,
+            )
+            db.session.commit()
+            self.assertFalse(case.archived)
+            self.assertIn(case.status, {"New - Email", "Email Parsed - Review"})
+
     def test_attachment_fills_missing_real_mis_fields(self):
         details = {
             "is_valuation": True,
