@@ -442,6 +442,27 @@ def normalized_header(value):
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
+def bank_template_key(value):
+    key = normalized_header(value)
+    for noise in ("housingfinance", "homefinance", "finance", "limited", "ltd"):
+        key = key.replace(noise, "")
+    return key
+
+
+def matching_master_template(bank_name):
+    bank_key = bank_template_key(bank_name)
+    if not bank_key:
+        return None
+    candidates = FileAsset.query.filter_by(asset_type="template").order_by(
+        FileAsset.created_at.desc()
+    ).all()
+    for candidate in candidates:
+        keys = (bank_template_key(candidate.category), bank_template_key(candidate.filename))
+        if any(key and (key == bank_key or key in bank_key or bank_key in key) for key in keys):
+            return candidate
+    return None
+
+
 def numeric_km(value):
     match = re.search(r"\d+(?:\.\d+)?", str(value or ""))
     return float(match.group()) if match else None
@@ -1336,12 +1357,13 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
         # through Gmail's own search syntax as a narrow fallback.
         if is_gmail and mail.select('"[Gmail]/All Mail"')[0] == "OK":
             gmail_query = (
-                f"from:(lifl.in) after:{(start_date - timedelta(days=1)):%Y/%m/%d} "
+                f'{{from:(lifl.in) from:(lifc.in) "LIFC - TECHNICAL Case Assignment"}} '
+                f"after:{(start_date - timedelta(days=1)):%Y/%m/%d} "
                 f"before:{(end_date + timedelta(days=1)):%Y/%m/%d}"
             )
             status, payload = mail.search(None, "X-GM-RAW", f'"{gmail_query}"')
             if status == "OK":
-                for msg_id in payload[0].split()[-100:]:
+                for msg_id in payload[0].split():
                     raw = fetch_mis_message(mail, msg_id)
                     if raw:
                         raw_messages.append(('"[Gmail]/All Mail"', msg_id, raw))
@@ -2474,11 +2496,13 @@ def case_detail(case_id):
             db.and_(FileAsset.asset_type == "case_template", FileAsset.case_id == case_id),
         )
     ).order_by(FileAsset.created_at.desc()).all()
+    recommended_template = matching_master_template(case.bank_name)
     return render_template(
         "case_detail.html", case=case, valuation=valuation, assets=assets,
         extraction=extraction, templates=templates, ai_enabled=ai_enabled(),
         document_ai_enabled=document_ai_enabled(),
         ai_model=OPENAI_MODEL, case_profile=safe_json(case.extracted_json),
+        recommended_template=recommended_template,
     )
 
 
@@ -3180,6 +3204,56 @@ def generate_report(case_id):
         db.session.add(valuation)
         db.session.commit()
     assets = FileAsset.query.filter_by(case_id=case_id).all()
+    # Generate must never silently create a blank report when the operator
+    # forgot to press "Process All Files" first. Process current inputs here
+    # and rebuild the source-separated profile before filling the template.
+    document_extractions = []
+    visit_extractions = []
+    for asset in assets:
+        inferred_type, inferred_source = quick_asset_type(asset.filename)
+        if asset.asset_type == "document" and inferred_type == "visit_data":
+            asset.asset_type = "visit_data"
+        if asset.asset_type == "photo":
+            result = classify_property_photo(asset.filename, asset.content)
+            asset.category = result.get("category", "Other Site Photo")
+            asset.extraction_json = json.dumps(result, ensure_ascii=False)
+        elif asset.asset_type in {"document", "visit_data"}:
+            source_kind = "visit_data" if asset.asset_type == "visit_data" else inferred_source
+            asset.extracted_text = asset.extracted_text or extract_basic_text(
+                asset.filename, asset.content
+            )
+            extraction = ai_extract_document(
+                asset.filename, asset.content, asset.extracted_text or "", source_kind
+            )
+            asset.extraction_json = json.dumps(extraction, ensure_ascii=False)
+        extraction = safe_json(asset.extraction_json)
+        if asset.asset_type == "document" and extraction:
+            document_extractions.append(extraction)
+        elif asset.asset_type == "visit_data" and extraction:
+            visit_extractions.append(extraction)
+        db.session.add(asset)
+    stored_before = safe_json(case.extracted_json)
+    email_data = stored_before.get(
+        "email", stored_before if "application_number" in stored_before else {}
+    )
+    refreshed_profile = build_case_profile(
+        email_data, document_extractions, visit_extractions, valuation_as_dict(valuation)
+    )
+    reviewed_profile = stored_before.get("case_profile", {})
+    if reviewed_profile.get("source_reviewed"):
+        for field in SOURCE_REVIEW_FIELDS:
+            if field in reviewed_profile:
+                refreshed_profile[field] = reviewed_profile[field]
+        refreshed_profile["source_reviewed"] = True
+        refreshed_profile["source_reviewed_at"] = reviewed_profile.get(
+            "source_reviewed_at", ""
+        )
+    case.extracted_json = json.dumps(
+        {"email": email_data, "case_profile": refreshed_profile},
+        ensure_ascii=False,
+        default=str,
+    )
+    db.session.commit()
     template_id = request.form.get("template_id")
     stored = safe_json(case.extracted_json)
     profile = dict(stored.get("case_profile") or stored.get("email") or stored)
@@ -3246,6 +3320,8 @@ def generate_report(case_id):
         template = FileAsset.query.filter_by(
             case_id=case_id, asset_type="case_template"
         ).order_by(FileAsset.created_at.desc()).first()
+    if template is None:
+        template = matching_master_template(case.bank_name)
     if template is None:
         flash(
             "Pehle bank ka original Excel/Word valuation format upload aur select karein. "

@@ -114,6 +114,7 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Dashboard / MIS", response.data)
         self.assertIn(b"Process All Files", response.data)
+        self.assertIn(b"Upload Site Photos", response.data)
 
     def test_dashboard_announces_one_minute_auto_refresh(self):
         self.login()
@@ -542,7 +543,7 @@ class SvaiSmokeTests(unittest.TestCase):
             "_csrf_token": self.csrf(),
             "application_number": "SMOKE-001",
             "customer_name": "Smoke Test",
-            "bank_name": "Test Bank",
+            "bank_name": "Laxmi India Finance",
             "property_address": "Vidisha, MP",
         })
         self.assertEqual(response.status_code, 302)
@@ -585,16 +586,9 @@ class SvaiSmokeTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 302)
 
-        with app.app_context():
-            template = FileAsset.query.filter_by(
-                asset_type="template", filename="Laxmi India.xlsx"
-            ).first()
-            self.assertIsNotNone(template)
-            template_id = template.id
-
         report = self.client.post(f"/cases/{case_id}/report", data={
             "_csrf_token": self.csrf(),
-            "template_id": str(template_id),
+            "template_id": "",
         })
         self.assertEqual(report.status_code, 200)
         self.assertIn(
@@ -604,6 +598,8 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertGreater(len(report.data), 1000)
         generated = load_workbook(io.BytesIO(report.data), data_only=False)
         self.assertIn("MOTA RAM", generated.sheetnames)
+        self.assertEqual(generated["MOTA RAM"]["D9"].value, "SMOKE-001")
+        self.assertEqual(generated["MOTA RAM"]["D10"].value, "Smoke Test")
 
         with app.app_context():
             self.assertIsNotNone(ValuationCase.query.get(case_id))
@@ -613,7 +609,7 @@ class SvaiSmokeTests(unittest.TestCase):
         reports_page = self.client.get("/reports")
         self.assertEqual(reports_page.status_code, 200)
         self.assertIn(b"SMOKE-001", reports_page.data)
-        self.assertIn(b"Test Bank", reports_page.data)
+        self.assertIn(b"Laxmi India Finance", reports_page.data)
         self.assertIn(b"Download", reports_page.data)
 
     def test_visit_form_pages_are_separate_and_source_review_is_saved(self):
