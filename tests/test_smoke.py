@@ -1,4 +1,5 @@
 import io
+import imaplib
 import json
 import os
 import sys
@@ -45,7 +46,7 @@ from server import (  # noqa: E402
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
     email_fetch_folders, mis_import_rows,
     concise_mis_address, mailbox_source, normalize_whatsapp_group_link,
-    fetch_full_message, fetch_mis_message, imap_safe_assignment_folders,
+    fetch_email_account, fetch_full_message, fetch_mis_message, imap_safe_assignment_folders,
     archived_case_has_assignment_identity, recover_structured_archived_cases,
 )
 
@@ -79,6 +80,55 @@ class SvaiSmokeTests(unittest.TestCase):
         response = self.login()
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers["Location"], "/")
+
+    def test_gmail_lifc_fallback_error_keeps_standard_scan_results(self):
+        """A malformed Gmail-only fallback must not stop normal IMAP import."""
+        raw_message = (
+            b"Message-ID: <lifc-fallback-test@example.com>\r\n"
+            b"Date: Mon, 10 Aug 2026 10:00:00 +0530\r\n"
+            b"From: cases@lifl.in\r\n"
+            b"Subject: LIFC - TECHNICAL Case Assignment\r\n"
+            b"\r\n"
+            b"Fresh valuation request. Application No: LAPVDS100030855. "
+            b"Applicant: Bahadur Singh. Branch: Vidisha."
+        )
+
+        class FakeGmail:
+            def login(self, *_args):
+                return "OK", []
+
+            def list(self):
+                return "OK", [b'(\\HasNoChildren) "/" "INBOX"']
+
+            def select(self, _folder):
+                return "OK", [b"1"]
+
+            def search(self, _charset, criterion, *_query):
+                if criterion == "X-GM-RAW":
+                    raise imaplib.IMAP4.error("Could not parse command")
+                return "OK", [b"1"]
+
+            def fetch(self, _msg_id, _parts):
+                return "OK", [(b"1 (RFC822)", raw_message)]
+
+            def logout(self):
+                return "BYE", []
+
+        account = EmailAccount(
+            email="fetch-test@gmail.com",
+            provider="gmail",
+            encrypted_password=encrypt_password("abcdefghijklmnop"),
+            active=True,
+        )
+        with app.app_context():
+            db.session.add(account)
+            db.session.commit()
+            with patch("server.imaplib.IMAP4_SSL", return_value=FakeGmail()):
+                result = fetch_email_account(
+                    account, datetime(2026, 8, 10).date(), datetime(2026, 8, 10).date()
+                )
+            self.assertEqual(result["created"], 1)
+            self.assertIn("fallback search skipped", result["warning"])
 
     def test_configured_admin_password_repairs_stale_persistent_hash(self):
         address = "render-admin@example.com"

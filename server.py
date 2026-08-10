@@ -1403,19 +1403,31 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 break
         # Gmail's normal IMAP date search can miss a bank message when Gmail
         # has indexed it under a category/label.  Query the known LIFC sender
-        # through Gmail's own search syntax as a narrow fallback.
+        # through Gmail's own search syntax as a narrow fallback.  This is
+        # deliberately best-effort: a Gmail-specific search error must never
+        # discard messages already found by the standard IMAP search.
         if is_gmail and mail.select('"[Gmail]/All Mail"')[0] == "OK":
-            gmail_query = (
-                f'{{from:(lifl.in) from:(lifc.in) "LIFC - TECHNICAL Case Assignment"}} '
-                f"after:{(start_date - timedelta(days=1)):%Y/%m/%d} "
-                f"before:{(end_date + timedelta(days=1)):%Y/%m/%d}"
-            )
-            status, payload = mail.search(None, "X-GM-RAW", f'"{gmail_query}"')
-            if status == "OK":
-                for msg_id in payload[0].split():
-                    raw = fetch_mis_message(mail, msg_id)
-                    if raw:
-                        raw_messages.append(('"[Gmail]/All Mail"', msg_id, raw))
+            for sender_domain in ("lifl.in", "lifc.in"):
+                gmail_query = (
+                    f"from:{sender_domain} "
+                    f"after:{(start_date - timedelta(days=1)):%Y/%m/%d} "
+                    f"before:{(end_date + timedelta(days=1)):%Y/%m/%d}"
+                )
+                try:
+                    status, payload = mail.search(
+                        None, "X-GM-RAW", f'"{gmail_query}"'
+                    )
+                except imaplib.IMAP4.error as exc:
+                    warning = (
+                        "Gmail LIFC fallback search skipped; standard mailbox "
+                        f"scan continued. {exc}"
+                    )
+                    continue
+                if status == "OK":
+                    for msg_id in payload[0].split():
+                        raw = fetch_mis_message(mail, msg_id)
+                        if raw:
+                            raw_messages.append(('"[Gmail]/All Mail"', msg_id, raw))
         if not scanned_folders:
             return {"created": 0, "ignored": 0, "message": "Mailbox folder search failed"}
 
