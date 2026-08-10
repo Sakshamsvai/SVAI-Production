@@ -2203,7 +2203,6 @@ def dashboard():
     ).limit(2000).all()
     stats = {
         "cases": ValuationCase.query.filter_by(archived=False).count(),
-        "documents": FileAsset.query.filter_by(asset_type="document").count(),
         "reports": FileAsset.query.filter_by(asset_type="report").count(),
     }
     return render_template(
@@ -2213,6 +2212,40 @@ def dashboard():
         whatsapp_groups=WhatsAppGroup.query.filter_by(active=True).order_by(WhatsAppGroup.name).all(),
         ai_enabled=ai_enabled(), ai_model=OPENAI_MODEL,
     )
+
+
+@app.route("/reports")
+@login_required
+def reports_page():
+    reports = FileAsset.query.filter_by(asset_type="report").order_by(
+        FileAsset.created_at.desc()
+    ).all()
+    case_ids = {item.case_id for item in reports if item.case_id}
+    cases = {
+        item.id: item
+        for item in ValuationCase.query.filter(ValuationCase.id.in_(case_ids)).all()
+    } if case_ids else {}
+    return render_template("reports.html", reports=reports, cases=cases)
+
+
+@app.route("/reports/cleanup-inputs", methods=["POST"])
+@login_required
+def cleanup_report_inputs():
+    report_case_ids = {
+        case_id for (case_id,) in db.session.query(FileAsset.case_id).filter(
+            FileAsset.asset_type == "report",
+            FileAsset.case_id.isnot(None),
+        ).distinct().all()
+    }
+    deleted = 0
+    if report_case_ids:
+        deleted = FileAsset.query.filter(
+            FileAsset.case_id.in_(report_case_ids),
+            FileAsset.asset_type.in_({"document", "photo", "visit_data", "case_template"}),
+        ).delete(synchronize_session=False)
+        db.session.commit()
+    flash(f"{deleted} completed-report upload(s) storage se remove kiye gaye.", "success")
+    return redirect(url_for("reports_page"))
 
 
 @app.route("/site-engineers", methods=["GET", "POST"])
@@ -3259,6 +3292,13 @@ def generate_report(case_id):
         content=output,
     )
     db.session.add(report)
+    # Uploaded case inputs are temporary working files.  The generated report
+    # keeps the final output; source facts already remain in the reviewed case
+    # profile, so remove bulky inputs after successful generation.
+    temporary_types = {"document", "photo", "visit_data", "case_template"}
+    for asset in assets:
+        if asset.asset_type in temporary_types:
+            db.session.delete(asset)
     case.status = "Draft Report Generated"
     db.session.commit()
     return send_file(

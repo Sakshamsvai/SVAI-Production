@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Generated Reports - SVAI{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-head">
+    <div><h1>Generated Reports</h1><p>Case aur bank ke hisaab se saved reports. Yahin se download karein.</p></div>
+    <div class="row-actions">
+      <form method="post" action="{{ url_for('cleanup_report_inputs') }}" data-confirm="Generated reports wale cases ke purane uploaded documents aur photos permanently remove kar dein?">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <button class="secondary" type="submit">Clean completed uploads</button>
+      </form>
+      <a class="button secondary" href="{{ url_for('dashboard') }}">Back to MIS</a>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Generated</th><th>Application No.</th><th>Customer</th><th>Bank</th><th>Report File</th><th>Actions</th></tr></thead>
+      <tbody>
+      {% for report in reports %}
+        {% set case = cases.get(report.case_id) %}
+        <tr>
+          <td>{{ report.created_at.strftime('%d-%m-%Y %I:%M %p') if report.created_at else '' }}</td>
+          <td class="mono">{{ case.application_number if case else '-' }}</td>
+          <td>{{ case.customer_name if case else 'Deleted/unknown case' }}</td>
+          <td>{{ report.category or (case.bank_name if case else '') or '-' }}</td>
+          <td>{{ report.filename }}</td>
+          <td class="row-actions">
+            {% if case %}<a class="mini-button" href="{{ url_for('case_detail', case_id=case.id) }}">Open Case</a>{% endif %}
+            <a class="mini-button green" href="{{ url_for('download_asset', asset_id=report.id) }}">Download</a>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="empty">Abhi koi generated report saved nahi hai.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

@@ -103,7 +103,7 @@ class SvaiSmokeTests(unittest.TestCase):
 
     def test_primary_pages_render(self):
         self.login()
-        for path in ["/", "/email-accounts", "/site-engineers", "/templates", "/billing", "/settings"]:
+        for path in ["/", "/email-accounts", "/site-engineers", "/templates", "/reports", "/billing", "/settings"]:
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, path)
             self.assertIn(b"Dashboard / MIS", response.data)
@@ -122,6 +122,10 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn(b"Auto fetch + refresh: every 1 minute", response.data)
         self.assertIn(b"monthly catch-up: hourly", response.data)
         self.assertIn(b"60000", response.data)
+        self.assertIn(b"Generated Reports", response.data)
+        self.assertNotIn(b"Property Documents", response.data)
+        self.assertNotIn(b"K.M.</th>", response.data)
+        self.assertNotIn(b">Bills</a>", response.data)
 
     def test_billing_fills_existing_invoice_table_with_km_slab_amount(self):
         workbook = Workbook()
@@ -603,9 +607,14 @@ class SvaiSmokeTests(unittest.TestCase):
 
         with app.app_context():
             self.assertIsNotNone(ValuationCase.query.get(case_id))
-            self.assertEqual(FileAsset.query.filter_by(case_id=case_id, asset_type="photo").count(), 1)
-            self.assertEqual(FileAsset.query.filter_by(case_id=case_id, asset_type="document").count(), 1)
+            self.assertEqual(FileAsset.query.filter_by(case_id=case_id, asset_type="photo").count(), 0)
+            self.assertEqual(FileAsset.query.filter_by(case_id=case_id, asset_type="document").count(), 0)
             self.assertEqual(FileAsset.query.filter_by(case_id=case_id, asset_type="report").count(), 1)
+        reports_page = self.client.get("/reports")
+        self.assertEqual(reports_page.status_code, 200)
+        self.assertIn(b"SMOKE-001", reports_page.data)
+        self.assertIn(b"Test Bank", reports_page.data)
+        self.assertIn(b"Download", reports_page.data)
 
     def test_visit_form_pages_are_separate_and_source_review_is_saved(self):
         self.login()
@@ -1340,7 +1349,7 @@ class SvaiSmokeTests(unittest.TestCase):
             self.assertEqual(case.status, "Draft Report Generated")
             self.assertEqual(
                 FileAsset.query.filter_by(case_id=case_id, asset_type="photo").count(),
-                1,
+                0,
             )
 
     def test_unknown_uploaded_excel_keeps_structure_and_fills_in_place(self):
