@@ -109,9 +109,9 @@ def offline_ocr_text(filename: str, content: bytes) -> str:
         images = []
         if ext == ".pdf":
             document = fitz.open(stream=content, filetype="pdf")
-            max_pages = max(1, int(os.getenv("LOCAL_OCR_MAX_PAGES", "12")))
+            max_pages = max(1, int(os.getenv("LOCAL_OCR_MAX_PAGES", "6")))
             for page in document[:max_pages]:
-                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
                 image = cv2.imdecode(
                     np.frombuffer(pixmap.tobytes("png"), dtype=np.uint8),
                     cv2.IMREAD_COLOR,
