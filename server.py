@@ -1375,9 +1375,14 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
         raise ValueError("From date cannot be after To date.")
     host = detect_imap(account.email, account.provider, account.imap_host or "")
     password = decrypt_password(account.encrypted_password)
-    mail = imaplib.IMAP4_SSL(host, 993)
+    # IMAP servers can silently stall while opening a TLS connection.  A
+    # bounded timeout keeps one unavailable mailbox from blocking the MIS
+    # refresh (and, consequently, other linked mailbox accounts).
+    imap_timeout = max(5, int(os.getenv("IMAP_TIMEOUT_SECONDS", "25")))
+    mail = None
     warning = ""
     try:
+        mail = imaplib.IMAP4_SSL(host, 993, timeout=imap_timeout)
         mail.login(account.email, password)
         since = start_date.strftime("%d-%b-%Y")
         before = (end_date + timedelta(days=1)).strftime("%d-%b-%Y")
@@ -1552,8 +1557,8 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
             ),
             "warning": warning,
         }
-    except imaplib.IMAP4.abort as exc:
-        warning = f"Mailbox connection ended early: {exc}"
+    except (imaplib.IMAP4.abort, OSError) as exc:
+        warning = f"Mailbox connection failed or ended early: {exc}"
         return {
             "created": created,
             "updated": updated,
@@ -1562,10 +1567,11 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
             "warning": warning,
         }
     finally:
-        try:
-            mail.logout()
-        except Exception:
-            pass
+        if mail is not None:
+            try:
+                mail.logout()
+            except Exception:
+                pass
 
 
 def classify_photo(filename: str) -> str:
@@ -2438,10 +2444,7 @@ def initiate_visit(case_id):
             return redirect(url_for("dashboard"))
         case.visit_by = group.name
         db.session.commit()
-        return render_template(
-            "whatsapp_dispatch.html", case=case, group=group, message=message,
-            share_url=f"https://wa.me/?text={quote(message)}",
-        )
+        return redirect(f"https://wa.me/?text={quote(message)}")
     flash("Valid engineer ya WhatsApp group select karein.", "error")
     return redirect(url_for("dashboard"))
 

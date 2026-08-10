@@ -130,6 +130,22 @@ class SvaiSmokeTests(unittest.TestCase):
             self.assertEqual(result["created"], 1)
             self.assertIn("fallback search skipped", result["warning"])
 
+    def test_mis_fetch_returns_a_warning_when_imap_connection_fails(self):
+        """One unreachable mailbox must not abort the whole MIS refresh."""
+        account = EmailAccount(
+            email="offline-fetch@gmail.com",
+            provider="gmail",
+            encrypted_password=encrypt_password("abcdefghijklmnop"),
+            active=True,
+        )
+        with app.app_context():
+            with patch("server.imaplib.IMAP4_SSL", side_effect=OSError("network unavailable")):
+                result = fetch_email_account(
+                    account, datetime(2026, 8, 10).date(), datetime(2026, 8, 10).date()
+                )
+        self.assertEqual(result["created"], 0)
+        self.assertIn("connection failed", result["warning"])
+
     def test_configured_admin_password_repairs_stale_persistent_hash(self):
         address = "render-admin@example.com"
         configured_password = "ConfiguredPassword123!"
@@ -620,14 +636,14 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(saved_group.status_code, 302)
         with app.app_context():
             group_id = WhatsAppGroup.query.filter_by(name="Ashta Site Team").first().id
-        group_page = self.client.post(f"/cases/{case_id}/initiate-visit", data={
+        group_redirect = self.client.post(f"/cases/{case_id}/initiate-visit", data={
             "_csrf_token": self.csrf(), "recipient": f"group:{group_id}",
         })
-        self.assertEqual(group_page.status_code, 200)
-        self.assertIn(b"Open WhatsApp", group_page.data)
-        self.assertIn(b"No Copy/Paste", group_page.data)
-        self.assertIn(b"Visit Customer", group_page.data)
-        self.assertNotIn(b"photos offline phone camera", group_page.data)
+        self.assertEqual(group_redirect.status_code, 302)
+        group_location = unquote(group_redirect.headers["Location"])
+        self.assertIn("https://wa.me/?text=", group_location)
+        self.assertIn("Visit Customer", group_location)
+        self.assertNotIn("photos offline phone camera", group_location)
         self.assertEqual(
             normalize_whatsapp_group_link(
                 "https://chat.whatsapp.com/CZiTfIiZlEYCkBK8y7pyTa?s=sw&p=i&ilr=0"
