@@ -46,7 +46,7 @@ from server import (  # noqa: E402
     email_fetch_folders, mis_import_rows,
     concise_mis_address, mailbox_source, normalize_whatsapp_group_link,
     fetch_full_message, fetch_mis_message, imap_safe_assignment_folders,
-    archived_case_has_assignment_identity,
+    archived_case_has_assignment_identity, recover_structured_archived_cases,
 )
 
 
@@ -1176,6 +1176,35 @@ class SvaiSmokeTests(unittest.TestCase):
             archived=True,
         )
         self.assertFalse(archived_case_has_assignment_identity(junk))
+
+    def test_fetch_sweep_recovers_structured_archived_rows(self):
+        with app.app_context():
+            account = EmailAccount(
+                email="sweep-recovery@gmail.com",
+                provider="gmail",
+                encrypted_password=encrypt_password("abcdefghijklmnop"),
+                active=True,
+            )
+            genuine = ValuationCase(
+                application_number="AYE-000003928097-LOS",
+                customer_name="JAGDISH",
+                contact_number="7428492943",
+                property_address="Village Mendori, Bhopal",
+                branch_name="Karond",
+                case_type="LAP",
+                status="Ignored - Not Valuation Email",
+                archived=True,
+                source_email=account.email,
+                email_received_at=datetime(2026, 8, 10, 6, 5),
+            )
+            db.session.add_all([account, genuine])
+            db.session.commit()
+            recovered = recover_structured_archived_cases(
+                account, datetime(2026, 8, 1).date(), datetime(2026, 8, 10).date()
+            )
+            self.assertEqual(recovered, 1)
+            self.assertFalse(genuine.archived)
+            self.assertEqual(genuine.status, "Email Parsed - Review")
 
     def test_attachment_fills_missing_real_mis_fields(self):
         details = {

@@ -1278,6 +1278,22 @@ def recover_archived_assignment(case):
     return True
 
 
+def recover_structured_archived_cases(account, start_date, end_date):
+    start_dt = datetime.combine(start_date, datetime.min.time())
+    end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+    candidates = ValuationCase.query.filter(
+        ValuationCase.archived.is_(True),
+        ValuationCase.source_email == account.email,
+        db.func.coalesce(
+            ValuationCase.email_received_at, ValuationCase.created_at
+        ) >= start_dt,
+        db.func.coalesce(
+            ValuationCase.email_received_at, ValuationCase.created_at
+        ) < end_dt,
+    ).all()
+    return sum(1 for case in candidates if recover_archived_assignment(case))
+
+
 def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
     created = 0
     updated = 0
@@ -1440,6 +1456,7 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 updated += 1
             else:
                 created += 1
+        updated += recover_structured_archived_cases(account, start_date, end_date)
         account.last_fetch_at = datetime.utcnow()
         db.session.commit()
         deduplicated = merge_cross_mailbox_duplicate_cases()
