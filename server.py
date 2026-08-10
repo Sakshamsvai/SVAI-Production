@@ -88,6 +88,55 @@ DOCUMENT_EXTENSIONS = {
 }
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 TEMPLATE_EXTENSIONS = {".xlsx", ".xlsm", ".docx"}
+
+_offline_ocr_engine = None
+
+
+def offline_ocr_text(filename: str, content: bytes) -> str:
+    """Read scanned PDFs/images locally; no network or paid API is used."""
+    global _offline_ocr_engine
+    ext = Path(filename).suffix.lower()
+    if ext not in PHOTO_EXTENSIONS | {".pdf"} or not content:
+        return ""
+    try:
+        import cv2
+        import fitz
+        import numpy as np
+        from rapidocr_onnxruntime import RapidOCR
+
+        if _offline_ocr_engine is None:
+            _offline_ocr_engine = RapidOCR()
+        images = []
+        if ext == ".pdf":
+            document = fitz.open(stream=content, filetype="pdf")
+            max_pages = max(1, int(os.getenv("LOCAL_OCR_MAX_PAGES", "12")))
+            for page in document[:max_pages]:
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                image = cv2.imdecode(
+                    np.frombuffer(pixmap.tobytes("png"), dtype=np.uint8),
+                    cv2.IMREAD_COLOR,
+                )
+                if image is not None:
+                    images.append(image)
+            document.close()
+        else:
+            image = cv2.imdecode(
+                np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR
+            )
+            if image is not None:
+                images.append(image)
+        pages = []
+        for image in images:
+            result, _ = _offline_ocr_engine(image)
+            if result:
+                pages.append("\n".join(
+                    str(line[1]).strip() for line in result
+                    if len(line) > 1 and str(line[1]).strip()
+                ))
+        return "\n\n".join(pages)[:50000]
+    except Exception:
+        app.logger.exception("Offline OCR failed for %s", filename)
+        return ""
 SEED_TEMPLATES_DIR = BASE_DIR / "seed_templates"
 APP_TIMEZONE = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Kolkata"))
 
@@ -1520,7 +1569,12 @@ def extract_basic_text(filename: str, content: bytes) -> str:
     try:
         if ext == ".pdf":
             reader = PdfReader(io.BytesIO(content))
-            return "\n".join((page.extract_text() or "") for page in reader.pages)[:50000]
+            text = "\n".join((page.extract_text() or "") for page in reader.pages)[:50000]
+            if len(re.sub(r"\s+", "", text)) >= 80:
+                return text
+            return offline_ocr_text(filename, content) or text
+        if ext in PHOTO_EXTENSIONS:
+            return offline_ocr_text(filename, content)
         if ext == ".docx":
             document = Document(io.BytesIO(content))
             output = [p.text for p in document.paragraphs if p.text.strip()]
@@ -3275,11 +3329,11 @@ def generate_report(case_id):
         inferred_type, inferred_source = quick_asset_type(asset.filename)
         if asset.asset_type == "document" and inferred_type == "visit_data":
             asset.asset_type = "visit_data"
-        if asset.asset_type == "photo":
+        if asset.asset_type == "photo" and not asset.extraction_json:
             result = classify_property_photo(asset.filename, asset.content)
             asset.category = result.get("category", "Other Site Photo")
             asset.extraction_json = json.dumps(result, ensure_ascii=False)
-        elif asset.asset_type in {"document", "visit_data"}:
+        elif asset.asset_type in {"document", "visit_data"} and not asset.extraction_json:
             source_kind = "visit_data" if asset.asset_type == "visit_data" else inferred_source
             asset.extracted_text = asset.extracted_text or extract_basic_text(
                 asset.filename, asset.content
