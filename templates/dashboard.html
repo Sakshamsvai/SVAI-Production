@@ -31,7 +31,7 @@
       <button class="green">Fetch Valuation Emails</button>
     </form>
     <a class="button secondary" href="{{ url_for('export_mis') }}?from={{ date_from.isoformat() }}&amp;to={{ date_to.isoformat() }}">Download MIS Excel</a>
-    <a class="button" href="{{ url_for('new_case') }}">+ Application No. Se Report</a>
+    <a class="button" href="{{ url_for('make_report') }}">+ Make Report</a>
     <form method="post" action="{{ url_for('import_mis') }}" enctype="multipart/form-data" class="inline-upload">
       <label class="button secondary">Import Existing MIS<input type="file" name="mis_file" accept=".xlsx" required hidden></label>
       <button type="submit">Add / Merge Cases</button>
