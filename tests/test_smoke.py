@@ -46,6 +46,7 @@ from server import (  # noqa: E402
     email_fetch_folders, mis_import_rows,
     concise_mis_address, mailbox_source, normalize_whatsapp_group_link,
     fetch_full_message, fetch_mis_message, imap_safe_assignment_folders,
+    archived_case_has_assignment_identity,
 )
 
 
@@ -1117,7 +1118,14 @@ class SvaiSmokeTests(unittest.TestCase):
 
     def test_refetch_recovers_a_previously_rejected_assignment(self):
         with app.app_context():
-            account = EmailAccount.query.first()
+            account = EmailAccount.query.first() or EmailAccount(
+                email="recovery-test@gmail.com",
+                provider="gmail",
+                encrypted_password=encrypt_password("abcdefghijklmnop"),
+                active=True,
+            )
+            db.session.add(account)
+            db.session.commit()
             case = ValuationCase(
                 application_number="AYE-000003928097-LOS",
                 customer_name="JAGDISH",
@@ -1146,6 +1154,28 @@ class SvaiSmokeTests(unittest.TestCase):
             db.session.commit()
             self.assertFalse(case.archived)
             self.assertIn(case.status, {"New - Email", "Email Parsed - Review"})
+
+    def test_structured_archived_assignment_is_safe_to_recover(self):
+        genuine = ValuationCase(
+            application_number="AYE-000003928097-LOS",
+            customer_name="JAGDISH",
+            contact_number="7428492943",
+            property_address="Village Mendori, Bhopal",
+            branch_name="Karond",
+            case_type="LAP",
+            archived=True,
+        )
+        self.assertTrue(archived_case_has_assignment_identity(genuine))
+        junk = ValuationCase(
+            application_number="TENOR-20YRS",
+            customer_name="SATYAPAL SINGH JADON",
+            contact_number="9340171648",
+            bank_name="Gmail",
+            branch_name="Gwalior",
+            case_type="Purchase + Construction",
+            archived=True,
+        )
+        self.assertFalse(archived_case_has_assignment_identity(junk))
 
     def test_attachment_fills_missing_real_mis_fields(self):
         details = {

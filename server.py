@@ -1236,6 +1236,48 @@ def enrich_missing_address_from_email_document(details, mail, msg_id):
     return enrich_email_details_from_attachments(details, readable)
 
 
+def archived_case_has_assignment_identity(case):
+    """Recover a structured MIS assignment without trusting blank/junk mail.
+
+    Some lender systems send a useful case table but no literal "valuation"
+    phrase.  Earlier parser versions could create the structured row and a
+    later fetch could archive it.  Require a real application key plus several
+    independent case facts before reopening such a row.
+    """
+    application = normalized_application_number(case.application_number)
+    if (
+        len(application) < 6
+        or application in {
+            "APP", "APPLICANT", "APPLICATION", "CASE", "LEAD", "LOAN",
+            "PROPOSAL", "REFERENCE",
+        }
+        or any(token in application for token in ("ISO8859", "TENOR20YRS"))
+    ):
+        return False
+    bank = normalized_header(case.bank_name)
+    real_bank = bool(bank and bank not in {"gmail", "yahoo", "googlemail"})
+    has_property = bool((case.property_address or "").strip())
+    facts = (
+        bool((case.customer_name or "").strip()),
+        bool((case.contact_number or "").strip()),
+        has_property,
+        real_bank,
+        bool((case.branch_name or "").strip()),
+        bool((case.case_type or "").strip()),
+    )
+    return sum(facts) >= 3 and (has_property or real_bank)
+
+
+def recover_archived_assignment(case):
+    if not case or not case.archived or not archived_case_has_assignment_identity(case):
+        return False
+    case.archived = False
+    case.status = "Email Parsed - Review"
+    case.updated_at = datetime.utcnow()
+    db.session.commit()
+    return True
+
+
 def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
     created = 0
     updated = 0
@@ -1318,7 +1360,9 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 # MIS row disappear merely because a later parser version is
                 # stricter.  New rejected messages are still ignored, and an
                 # already archived rejection stays archived for review.
-                if existing_case and existing_case.source_email and not existing_case.archived:
+                if recover_archived_assignment(existing_case):
+                    updated += 1
+                elif existing_case and existing_case.source_email and not existing_case.archived:
                     existing_case.updated_at = datetime.utcnow()
                     db.session.commit()
                 ignored += 1
@@ -1326,7 +1370,9 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
 
             details = ai_extract_email(subject, body, sender)
             if not details.get("is_valuation", False) and not followup_mail:
-                if existing_case and existing_case.source_email and not existing_case.archived:
+                if recover_archived_assignment(existing_case):
+                    updated += 1
+                elif existing_case and existing_case.source_email and not existing_case.archived:
                     existing_case.updated_at = datetime.utcnow()
                     db.session.commit()
                 ignored += 1
