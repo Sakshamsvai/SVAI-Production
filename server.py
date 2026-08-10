@@ -2109,7 +2109,7 @@ def settings_page():
         requested_mode = "true" if paid_document_mode else "false"
         current_mode = (
             "true"
-            if os.getenv("OPENAI_DOCUMENT_EXTRACTION", "false").lower() == "true"
+            if os.getenv("OPENAI_DOCUMENT_EXTRACTION", "true").lower() == "true"
             else "false"
         )
         if requested_mode != current_mode:
@@ -2479,6 +2479,53 @@ def new_case():
     return render_template("new_case.html")
 
 
+@app.route("/make-report", methods=["GET", "POST"])
+@login_required
+def make_report():
+    master_templates = FileAsset.query.filter_by(asset_type="template").order_by(
+        FileAsset.category, FileAsset.created_at.desc()
+    ).all()
+    bank_names = []
+    for item in master_templates:
+        name = (item.category or "").strip()
+        if name and name not in bank_names:
+            bank_names.append(name)
+    if request.method == "POST":
+        application_number = request.form.get("application_number", "").strip()
+        bank_name = request.form.get("bank_name", "").strip()
+        if not application_number:
+            flash("Application number enter karein.", "error")
+            return render_template(
+                "make_report.html", bank_names=bank_names,
+                application_number=application_number, bank_name=bank_name,
+            )
+        application_key = normalized_application_number(application_number)
+        case = next((
+            item for item in ValuationCase.query.filter_by(archived=False).all()
+            if normalized_application_number(item.application_number) == application_key
+        ), None)
+        if case is None:
+            case = ValuationCase(
+                application_number=application_number,
+                bank_name=bank_name,
+                status="Files Pending",
+            )
+            db.session.add(case)
+        elif bank_name:
+            case.bank_name = bank_name
+        db.session.commit()
+        if not matching_master_template(case.bank_name):
+            flash(
+                "Selected bank ka master report format nahi mila. Report Formats me ek baar upload karein.",
+                "error",
+            )
+        return redirect(url_for("case_detail", case_id=case.id, report=1))
+    return render_template(
+        "make_report.html", bank_names=bank_names,
+        application_number="", bank_name="",
+    )
+
+
 @app.route("/cases/<int:case_id>")
 @login_required
 def case_detail(case_id):
@@ -2503,6 +2550,7 @@ def case_detail(case_id):
         document_ai_enabled=document_ai_enabled(),
         ai_model=OPENAI_MODEL, case_profile=safe_json(case.extracted_json),
         recommended_template=recommended_template,
+        report_mode=request.args.get("report") == "1",
     )
 
 
@@ -3204,6 +3252,20 @@ def generate_report(case_id):
         db.session.add(valuation)
         db.session.commit()
     assets = FileAsset.query.filter_by(case_id=case_id).all()
+    missing_inputs = []
+    if not any(asset.asset_type == "document" for asset in assets):
+        missing_inputs.append("Property Documents")
+    if not any(asset.asset_type == "visit_data" for asset in assets):
+        missing_inputs.append("Visit Form / MP Kisan")
+    if not any(asset.asset_type == "photo" for asset in assets):
+        missing_inputs.append("Site Photos")
+    if missing_inputs:
+        flash(
+            "Report generate nahi hui. Mandatory upload missing: "
+            + ", ".join(missing_inputs),
+            "error",
+        )
+        return redirect(url_for("case_detail", case_id=case_id, report=1))
     # Generate must never silently create a blank report when the operator
     # forgot to press "Process All Files" first. Process current inputs here
     # and rebuild the source-separated profile before filling the template.
@@ -3290,11 +3352,28 @@ def generate_report(case_id):
     visit_images.sort(
         key=lambda asset: numeric_from_value(asset.category or "", asset.id)
     )
+    used_visit_ids = set()
+    for asset in visit_images:
+        filename_key = Path(asset.filename).stem.casefold()
+        category = None
+        if any(token in filename_key for token in ("google", "location", "map")):
+            category = "Location Map"
+        elif any(token in filename_key for token in ("kisan", "khasra", "bhulekh", "bhu")):
+            category = "Site Sketch"
+        if category:
+            photo_assets.append({
+                "filename": asset.filename,
+                "category": category,
+                "content": asset.content,
+            })
+            used_visit_ids.add(asset.id)
     if len(visit_images) >= 4:
         for asset, category in (
             (visit_images[-2], "Site Sketch"),
             (visit_images[-1], "Location Map"),
         ):
+            if asset.id in used_visit_ids:
+                continue
             photo_assets.append({
                 "filename": asset.filename,
                 "category": category,
@@ -3328,7 +3407,7 @@ def generate_report(case_id):
             "SVAI generic format nahi banayega.",
             "error",
         )
-        return redirect(url_for("case_detail", case_id=case_id))
+        return redirect(url_for("case_detail", case_id=case_id, report=1))
     try:
         extension = Path(template.filename).suffix.lower()
         if extension == ".docx":

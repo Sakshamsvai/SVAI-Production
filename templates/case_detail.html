@@ -10,6 +10,9 @@
     <button class="danger" data-confirm="Archive or reopen this case?">{{ "Reopen" if case.archived else "Archive Case" }}</button>
   </form>
 </div>
+{% if not report_mode %}
+<div class="alert success">Report banane ke liye upar <b>Make Report</b> option use karein. MIS ka Open view case checking ke liye hai.</div>
+{% endif %}
 
 <section class="card">
   <div class="step-title"><span>1</span><div><h2>Case Information</h2><p>Email subject/body se aaye customer name aur application number ko yahan review karein.</p></div></div>
@@ -214,6 +217,7 @@
   {% endif %}
 </details>
 
+{% if report_mode %}
 <section class="card report-card">
   <h2>Generate Draft Report</h2>
   <p>Uploaded bank format select karein. SVAI isi original file ki sheet/page/layout ko bina तोड़े data aur photos fill karega. Jo detail clear nahi hai woh review ke liye blank rahegi.</p>
@@ -231,4 +235,5 @@
   </form>
   <a href="{{ url_for('templates_page') }}">Manage global bank formats</a>
 </section>
+{% endif %}
 {% endblock %}

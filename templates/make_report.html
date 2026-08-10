@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Make Report - SVAI{% endblock %}
+{% block content %}
+<section class="card narrow-card">
+  <div class="section-head">
+    <div>
+      <h1>Make Report</h1>
+      <p>Application number aur bank select karein. Existing MIS case milega to wahi khulega; duplicate case nahi banega.</p>
+    </div>
+  </div>
+  <form method="post" class="form-grid two">
+    <label>Application Number
+      <input name="application_number" value="{{ application_number }}" required autofocus placeholder="Application / Lead number">
+    </label>
+    <label>Bank Master Format
+      <select name="bank_name" required>
+        <option value="">Select bank</option>
+        {% for name in bank_names %}
+        <option value="{{ name }}" {% if bank_name == name %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="full green">Open Report Workspace</button>
+  </form>
+  <p class="note">Agli screen par Property Documents, Visit Form/MP Kisan aur Site Photos upload karna mandatory hai. Saved master bank format automatic use hoga.</p>
+</section>
+{% endblock %}

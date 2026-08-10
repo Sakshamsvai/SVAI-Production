@@ -185,7 +185,7 @@ def ai_enabled():
 def document_ai_enabled():
     return bool(
         OPENAI_CLIENT
-        and os.getenv("OPENAI_DOCUMENT_EXTRACTION", "false").lower() == "true"
+        and os.getenv("OPENAI_DOCUMENT_EXTRACTION", "true").lower() == "true"
     )
 
 

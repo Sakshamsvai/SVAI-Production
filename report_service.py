@@ -551,15 +551,28 @@ def _excel_image(asset, max_width, max_height):
     stream = io.BytesIO(asset["content"])
     with PillowImage.open(stream) as image:
         image = ImageOps.exif_transpose(image)
-        width, height = image.size
-        prepared = image.convert("RGB")
+        category = asset.get("category") or ""
+        protected = category in {"Property Document", "Site Sketch", "Location Map", "MP Kisan"}
+        if protected:
+            width, height = image.size
+            prepared = image.convert("RGB")
+            ratio = min(max_width / max(width, 1), max_height / max(height, 1))
+            output_width = max(40, int(width * ratio))
+            output_height = max(40, int(height * ratio))
+        else:
+            output_width, output_height = int(max_width), int(max_height)
+            prepared = ImageOps.fit(
+                image.convert("RGB"),
+                (output_width, output_height),
+                method=PillowImage.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
         image_stream = io.BytesIO()
         prepared.save(image_stream, format="PNG", optimize=True)
         image_stream.seek(0)
-    ratio = min(max_width / max(width, 1), max_height / max(height, 1))
     excel_image = ExcelImage(image_stream)
-    excel_image.width = max(40, int(width * ratio))
-    excel_image.height = max(40, int(height * ratio))
+    excel_image.width = output_width
+    excel_image.height = output_height
     return excel_image
 
 
@@ -815,16 +828,30 @@ def _set_docx_cell(cell, value):
         paragraph.add_run(value)
 
 
-def _docx_picture(cell, asset, width=2.9):
+def _docx_picture(cell, asset, width=2.9, height=2.15):
     cell.text = ""
     paragraph = cell.paragraphs[0]
     paragraph.alignment = 1
     with PillowImage.open(io.BytesIO(asset["content"])) as image:
         image = ImageOps.exif_transpose(image).convert("RGB")
+        if (asset.get("category") or "") not in {
+            "Property Document", "Site Sketch", "Location Map", "MP Kisan"
+        }:
+            image = ImageOps.fit(
+                image,
+                (int(width * 300), int(height * 300)),
+                method=PillowImage.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
         stream = io.BytesIO()
         image.save(stream, format="PNG", optimize=True)
         stream.seek(0)
-        paragraph.add_run().add_picture(stream, width=Inches(width))
+        paragraph.add_run().add_picture(
+            stream, width=Inches(width),
+            **({} if (asset.get("category") or "") in {
+                "Property Document", "Site Sketch", "Location Map", "MP Kisan"
+            } else {"height": Inches(height)})
+        )
 
 
 def _looks_like_ummeed(document, template_name="", bank_name=""):

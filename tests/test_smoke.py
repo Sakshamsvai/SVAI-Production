@@ -103,7 +103,7 @@ class SvaiSmokeTests(unittest.TestCase):
 
     def test_primary_pages_render(self):
         self.login()
-        for path in ["/", "/email-accounts", "/site-engineers", "/templates", "/reports", "/billing", "/settings"]:
+        for path in ["/", "/make-report", "/email-accounts", "/site-engineers", "/templates", "/reports", "/billing", "/settings"]:
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, path)
             self.assertIn(b"Dashboard / MIS", response.data)
@@ -115,6 +115,54 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn(b"Dashboard / MIS", response.data)
         self.assertIn(b"Process All Files", response.data)
         self.assertIn(b"Upload Site Photos", response.data)
+
+    def test_make_report_reuses_existing_case_and_master_bank_format(self):
+        self.login()
+        with app.app_context():
+            case = ValuationCase(
+                application_number="MAKE-REPORT-001",
+                customer_name="Existing Report Customer",
+                bank_name="",
+                status="New - Email",
+            )
+            db.session.add(case)
+            db.session.commit()
+            case_id = case.id
+            before_count = ValuationCase.query.count()
+        response = self.client.post("/make-report", data={
+            "_csrf_token": self.csrf(),
+            "application_number": "MAKE REPORT 001",
+            "bank_name": "Laxmi India Finance",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], f"/cases/{case_id}?report=1")
+        with app.app_context():
+            self.assertEqual(ValuationCase.query.count(), before_count)
+            self.assertEqual(db.session.get(ValuationCase, case_id).bank_name, "Laxmi India Finance")
+        workspace = self.client.get(response.headers["Location"])
+        self.assertIn(b"Master format selected", workspace.data)
+        self.assertIn(b"Generate & Download Draft", workspace.data)
+
+    def test_report_requires_document_visit_form_and_site_photo(self):
+        self.login()
+        with app.app_context():
+            case = ValuationCase(
+                application_number="MANDATORY-001",
+                bank_name="Laxmi India Finance",
+                status="Files Pending",
+            )
+            db.session.add(case)
+            db.session.commit()
+            case_id = case.id
+        response = self.client.post(f"/cases/{case_id}/report", data={
+            "_csrf_token": self.csrf(), "template_id": "",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], f"/cases/{case_id}?report=1")
+        page = self.client.get(response.headers["Location"])
+        self.assertIn(b"Property Documents", page.data)
+        self.assertIn(b"Visit Form / MP Kisan", page.data)
+        self.assertIn(b"Site Photos", page.data)
 
     def test_dashboard_announces_one_minute_auto_refresh(self):
         self.login()
@@ -559,6 +607,16 @@ class SvaiSmokeTests(unittest.TestCase):
             data={
                 "_csrf_token": self.csrf(),
                 "files": (visit_archive, "visit.zip"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 302)
+
+        response = self.client.post(
+            f"/cases/{case_id}/upload/visit-form",
+            data={
+                "_csrf_token": self.csrf(),
+                "files": (io.BytesIO(b"visit-form-page"), "visit-page-1.jpg"),
             },
             content_type="multipart/form-data",
         )
@@ -1335,6 +1393,24 @@ class SvaiSmokeTests(unittest.TestCase):
             content_type="multipart/form-data",
         )
         self.assertEqual(response.status_code, 302)
+        documents = self.client.post(
+            f"/cases/{case_id}/upload/documents",
+            data={
+                "_csrf_token": self.csrf(),
+                "files": (io.BytesIO(b"property-document"), "registry.jpg"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(documents.status_code, 302)
+        visit_form = self.client.post(
+            f"/cases/{case_id}/upload/visit-form",
+            data={
+                "_csrf_token": self.csrf(),
+                "files": (io.BytesIO(b"visit-data"), "mp-kisan.jpg"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(visit_form.status_code, 302)
         report = self.client.post(f"/cases/{case_id}/report", data={
             "_csrf_token": self.csrf(),
             "template_id": "",
@@ -1472,6 +1548,8 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(len(laxmi._images), 1)
         self.assertEqual(laxmi._images[0].anchor._from.row + 1, 161)
         self.assertEqual(laxmi._images[0].anchor._from.col + 1, 1)
+        self.assertEqual(int(laxmi._images[0].width), 360)
+        self.assertEqual(int(laxmi._images[0].height), 300)
 
         no_site_profile = dict(profile)
         no_site_profile["property_address_as_per_site"] = ""
