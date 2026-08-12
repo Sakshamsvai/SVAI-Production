@@ -1486,6 +1486,16 @@ def _fetch_email_account_unlocked(
             raw = fetch_mis_message(mail, msg_id)
             if not raw:
                 continue
+            # A large Yahoo sweep can spend long enough fetching/parsing each
+            # message for Render PostgreSQL to close the connection used by the
+            # previous message. Drop that session before the next database
+            # lookup so SQLAlchemy's pre-ping opens a healthy connection.
+            db.session.remove()
+            account = db.session.get(EmailAccount, account_id)
+            if account is None:
+                raise RuntimeError(
+                    f"Linked mailbox {account_email} is no longer available."
+                )
             message = email_lib.message_from_bytes(raw)
             subject = decode_header_value(message.get("Subject", ""))
             sender = decode_header_value(message.get("From", ""))
