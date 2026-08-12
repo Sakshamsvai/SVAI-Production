@@ -3699,7 +3699,9 @@ def fetch_one_email(account_id):
     date_from = parse_iso_date(request.form.get("from"), default_from)
     date_to = parse_iso_date(request.form.get("to"), default_to)
     try:
-        result = fetch_email_account(account, date_from, date_to)
+        result = fetch_email_account(
+            account, date_from, date_to, enrich_documents=False
+        )
         flash(
             f"{result['created']} new, {result.get('updated', 0)} corrected valuation "
             f"case(s); {result.get('deduplicated', 0)} duplicate MIS row(s) merged; "
@@ -3726,7 +3728,9 @@ def fetch_all_emails():
     date_to = parse_iso_date(request.form.get("to"), default_to)
     for account in EmailAccount.query.filter_by(active=True).all():
         try:
-            result = fetch_email_account(account, date_from, date_to)
+            result = fetch_email_account(
+                account, date_from, date_to, enrich_documents=False
+            )
             total += result["created"]
             updated += result.get("updated", 0)
             deduplicated += result.get("deduplicated", 0)
