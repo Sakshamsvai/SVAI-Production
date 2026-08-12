@@ -27,6 +27,10 @@
           <td class="row-actions">
             {% if case %}<a class="mini-button" href="{{ url_for('case_detail', case_id=case.id) }}">Open Case</a>{% endif %}
             <a class="mini-button green" href="{{ url_for('download_asset', asset_id=report.id) }}">Download</a>
+            <form method="post" action="{{ url_for('delete_report', report_id=report.id) }}" data-confirm="Ye generated report permanently delete kar dein?">
+              <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+              <button class="mini-button danger" type="submit">Delete</button>
+            </form>
           </td>
         </tr>
       {% else %}

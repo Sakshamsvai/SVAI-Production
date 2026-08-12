@@ -736,6 +736,19 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn(b"SMOKE-001", reports_page.data)
         self.assertIn(b"Laxmi India Finance", reports_page.data)
         self.assertIn(b"Download", reports_page.data)
+        self.assertIn(b"Delete", reports_page.data)
+        with app.app_context():
+            report_id = FileAsset.query.filter_by(
+                case_id=case_id, asset_type="report"
+            ).one().id
+        deleted = self.client.post(
+            f"/reports/{report_id}/delete",
+            data={"_csrf_token": self.csrf()},
+        )
+        self.assertEqual(deleted.status_code, 302)
+        with app.app_context():
+            self.assertEqual(FileAsset.query.filter_by(id=report_id).count(), 0)
+            self.assertIsNotNone(db.session.get(ValuationCase, case_id))
 
     def test_visit_form_pages_are_separate_and_source_review_is_saved(self):
         self.login()
@@ -1637,7 +1650,14 @@ class SvaiSmokeTests(unittest.TestCase):
                 case_type="Subsequent",
                 created_at=__import__("datetime").datetime(2025, 2, 1, 10, 30),
             )
-            db.session.add_all([inside, outside])
+            archived = ValuationCase(
+                application_number="MIS-ARCHIVED-001",
+                customer_name="Archived duplicate",
+                bank_name="DCB",
+                archived=True,
+                created_at=__import__("datetime").datetime(2025, 1, 16, 10, 30),
+            )
+            db.session.add_all([inside, outside, archived])
             db.session.commit()
 
         response = self.client.get("/mis/export?from=2025-01-01&to=2025-01-31")
@@ -1655,6 +1675,7 @@ class SvaiSmokeTests(unittest.TestCase):
         ]
         self.assertIn("MIS-IN-001", application_numbers)
         self.assertNotIn("MIS-OUT-001", application_numbers)
+        self.assertNotIn("MIS-ARCHIVED-001", application_numbers)
 
     def test_bank_formats_keep_document_and_site_facts_separate(self):
         root = Path(__file__).resolve().parents[1]

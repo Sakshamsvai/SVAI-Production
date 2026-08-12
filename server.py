@@ -83,6 +83,7 @@ app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "false"
 db = SQLAlchemy(app)
 _setup_lock = threading.Lock()
 _runtime_setup_done = None
+_email_fetch_lock = threading.Lock()
 
 DOCUMENT_EXTENSIONS = {
     ".pdf", ".jpg", ".jpeg", ".png", ".webp", ".docx", ".xlsx"
@@ -1391,7 +1392,7 @@ def recover_structured_archived_cases(account, start_date, end_date):
     return sum(1 for case in candidates if recover_archived_assignment(case))
 
 
-def fetch_email_account(
+def _fetch_email_account_unlocked(
     account: EmailAccount, start_date=None, end_date=None,
     enrich_documents=True,
 ):
@@ -1613,6 +1614,28 @@ def fetch_email_account(
                 mail.logout()
             except Exception:
                 pass
+
+
+def fetch_email_account(
+    account: EmailAccount, start_date=None, end_date=None,
+    enrich_documents=True,
+):
+    """Run only one mailbox sweep per worker to prevent scheduler/UI overlap."""
+    if not _email_fetch_lock.acquire(blocking=False):
+        return {
+            "created": 0,
+            "updated": 0,
+            "ignored": 0,
+            "deduplicated": 0,
+            "message": "Mailbox scan already running; the next scheduled retry will continue.",
+            "warning": "Another MIS scan is already running.",
+        }
+    try:
+        return _fetch_email_account_unlocked(
+            account, start_date, end_date, enrich_documents=enrich_documents
+        )
+    finally:
+        _email_fetch_lock.release()
 
 
 def classify_photo(filename: str) -> str:
@@ -2365,6 +2388,17 @@ def reports_page():
         for item in ValuationCase.query.filter(ValuationCase.id.in_(case_ids)).all()
     } if case_ids else {}
     return render_template("reports.html", reports=reports, cases=cases)
+
+
+@app.route("/reports/<int:report_id>/delete", methods=["POST"])
+@login_required
+def delete_report(report_id):
+    report = FileAsset.query.filter_by(id=report_id, asset_type="report").first_or_404()
+    filename = report.filename
+    db.session.delete(report)
+    db.session.commit()
+    flash(f"Generated report {filename} delete ho gayi.", "success")
+    return redirect(url_for("reports_page"))
 
 
 @app.route("/reports/cleanup-inputs", methods=["POST"])
@@ -3719,7 +3753,9 @@ def export_mis():
     default_from, default_to = current_month_range()
     date_from = parse_iso_date(request.args.get("from"), default_from)
     date_to = parse_iso_date(request.args.get("to"), default_to)
-    query = filter_cases_by_dates(ValuationCase.query, date_from, date_to)
+    query = filter_cases_by_dates(
+        ValuationCase.query.filter_by(archived=False), date_from, date_to
+    )
     cases = query.order_by(
         db.func.coalesce(ValuationCase.email_received_at, ValuationCase.created_at)
     ).all()
