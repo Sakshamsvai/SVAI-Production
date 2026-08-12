@@ -30,6 +30,7 @@ from flask_sqlalchemy import SQLAlchemy
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from pypdf import PdfReader
+from sqlalchemy.orm import defer
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -818,7 +819,10 @@ def normalized_email_subject(subject):
 
 def normalized_application_number(value):
     """Stable key used only for matching; the displayed application stays unchanged."""
-    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+    key = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+    # Excel/manual MIS often drops numeric leading zeroes while lender emails
+    # retain them. They are the same application and must not become two rows.
+    return (key.lstrip("0") or "0") if key.isdigit() else key
 
 
 def is_followup_email(subject, body=""):
@@ -1412,7 +1416,7 @@ def fetch_email_account(
         mail.login(account.email, password)
         since = start_date.strftime("%d-%b-%Y")
         before = (end_date + timedelta(days=1)).strftime("%d-%b-%Y")
-        raw_messages = []
+        message_refs = []
         scanned_folders = []
         is_gmail = (account.provider or "").casefold() == "gmail" or account.email.casefold().endswith("@gmail.com")
         for folder in imap_safe_assignment_folders(account, mail):
@@ -1424,9 +1428,7 @@ def fetch_email_account(
                 continue
             scanned_folders.append(folder.strip('"'))
             for msg_id in payload[0].split():
-                raw = fetch_mis_message(mail, msg_id)
-                if raw:
-                    raw_messages.append((folder, msg_id, raw))
+                message_refs.append((folder, msg_id))
             # Gmail All Mail is authoritative and already includes Inbox and
             # custom-label messages. Stop after the first selectable folder so
             # the same full messages/attachments are not downloaded repeatedly.
@@ -1456,14 +1458,23 @@ def fetch_email_account(
                     continue
                 if status == "OK":
                     for msg_id in payload[0].split():
-                        raw = fetch_mis_message(mail, msg_id)
-                        if raw:
-                            raw_messages.append(('"[Gmail]/All Mail"', msg_id, raw))
+                        message_refs.append(('"[Gmail]/All Mail"', msg_id))
         if not scanned_folders:
             return {"created": 0, "ignored": 0, "message": "Mailbox folder search failed"}
 
         seen_message_ids = set()
-        for source_folder, msg_id, raw in raw_messages:
+        selected_folder = None
+        for source_folder, msg_id in message_refs:
+            # Fetch and process one message at a time. Holding a whole month of
+            # MIME bodies (and Yahoo RFC822 attachment fallbacks) in a list can
+            # exceed Render's 512 MB worker limit.
+            if selected_folder != source_folder:
+                if mail.select(source_folder)[0] != "OK":
+                    continue
+                selected_folder = source_folder
+            raw = fetch_mis_message(mail, msg_id)
+            if not raw:
+                continue
             message = email_lib.message_from_bytes(raw)
             subject = decode_header_value(message.get("Subject", ""))
             sender = decode_header_value(message.get("From", ""))
@@ -1516,10 +1527,9 @@ def fetch_email_account(
                 and details.get("is_valuation", False)
                 and not followup_mail
             ):
-                if mail.select(source_folder)[0] == "OK":
-                    details = enrich_missing_address_from_email_document(
-                        details, mail, msg_id
-                    )
+                details = enrich_missing_address_from_email_document(
+                    details, mail, msg_id
+                )
             attachments = []
             details.pop("ai_error", None)
             if followup_mail:
@@ -2269,11 +2279,15 @@ def cleanup_email_documents():
     documents = FileAsset.query.filter(
         FileAsset.asset_type == "document",
         FileAsset.case_id.in_(email_case_ids),
-    ).all()
-    total_bytes = sum(len(item.content or b"") for item in documents)
-    count = len(documents)
-    for item in documents:
-        db.session.delete(item)
+    )
+    count, total_bytes = db.session.query(
+        db.func.count(FileAsset.id),
+        db.func.coalesce(db.func.sum(db.func.length(FileAsset.content)), 0),
+    ).filter(
+        FileAsset.asset_type == "document",
+        FileAsset.case_id.in_(email_case_ids),
+    ).one()
+    documents.delete(synchronize_session=False)
     db.session.commit()
     flash(
         f"{count} email-case document(s) delete hue; "
@@ -2342,7 +2356,7 @@ def dashboard():
 @app.route("/reports")
 @login_required
 def reports_page():
-    reports = FileAsset.query.filter_by(asset_type="report").order_by(
+    reports = FileAsset.query.options(defer(FileAsset.content)).filter_by(asset_type="report").order_by(
         FileAsset.created_at.desc()
     ).all()
     case_ids = {item.case_id for item in reports if item.case_id}
@@ -2631,13 +2645,15 @@ def make_report():
 def case_detail(case_id):
     case = ValuationCase.query.get_or_404(case_id)
     valuation = Valuation.query.filter_by(case_id=case_id).first()
-    assets = FileAsset.query.filter_by(case_id=case_id).order_by(FileAsset.created_at.desc()).all()
+    assets = FileAsset.query.options(defer(FileAsset.content)).filter_by(
+        case_id=case_id
+    ).order_by(FileAsset.created_at.desc()).all()
     extraction = {}
     for asset in assets:
         data = safe_json(asset.extraction_json)
         if data:
             extraction[asset.id] = data
-    templates = FileAsset.query.filter(
+    templates = FileAsset.query.options(defer(FileAsset.content)).filter(
         db.or_(
             FileAsset.asset_type == "template",
             db.and_(FileAsset.asset_type == "case_template", FileAsset.case_id == case_id),

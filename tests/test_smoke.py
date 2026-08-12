@@ -968,6 +968,10 @@ class SvaiSmokeTests(unittest.TestCase):
             normalized_application_number(" LAP-2026/0091 "),
             "LAP20260091",
         )
+        self.assertEqual(
+            normalized_application_number("00185940"),
+            normalized_application_number("185940"),
+        )
 
         system_pending_subject = "Technical case LAP-2026-0091 - system pending"
         system_pending_body = "Application No: LAP-2026-0091\nPlease system me kar do."
