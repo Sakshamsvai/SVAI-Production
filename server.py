@@ -1404,6 +1404,8 @@ def _fetch_email_account_unlocked(
     end_date = end_date or end_default
     if start_date > end_date:
         raise ValueError("From date cannot be after To date.")
+    account_id = account.id
+    account_email = account.email
     host = detect_imap(account.email, account.provider, account.imap_host or "")
     password = decrypt_password(account.encrypted_password)
     # IMAP servers can silently stall while opening a TLS connection.  A
@@ -1463,6 +1465,14 @@ def _fetch_email_account_unlocked(
         if not scanned_folders:
             return {"created": 0, "ignored": 0, "message": "Mailbox folder search failed"}
 
+        # The IMAP search can take long enough for Render PostgreSQL to close
+        # the connection that loaded ``account``. Release that idle session and
+        # reacquire the account on a fresh, pre-pinged DB connection before any
+        # MIS writes begin.
+        db.session.remove()
+        account = db.session.get(EmailAccount, account_id)
+        if account is None:
+            raise RuntimeError(f"Linked mailbox {account_email} is no longer available.")
         seen_message_ids = set()
         selected_folder = None
         for source_folder, msg_id in message_refs:
@@ -1600,6 +1610,7 @@ def _fetch_email_account_unlocked(
             "warning": warning,
         }
     except (imaplib.IMAP4.abort, OSError) as exc:
+        db.session.rollback()
         warning = f"Mailbox connection failed or ended early: {exc}"
         return {
             "created": created,
@@ -3723,6 +3734,7 @@ def fetch_all_emails():
             if result.get("warning"):
                 warnings.append(f"{account.email}: {result['warning']}")
         except Exception as exc:
+            db.session.rollback()
             errors.append(f"{account.email}: {exc}")
     flash(
         f"{total} valuation case(s) added; {updated} existing case(s) corrected; "
