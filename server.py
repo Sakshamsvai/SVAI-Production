@@ -1020,6 +1020,7 @@ def merge_cross_mailbox_duplicate_cases():
 def apply_followup_to_existing_case(
     target, details, attachments, subject, received, unique_id,
     action="Merged into existing MIS case; no new row created",
+    mark_for_review=False,
 ):
     if _message_already_recorded(target, unique_id):
         return False
@@ -1034,12 +1035,26 @@ def apply_followup_to_existing_case(
         if value and not (getattr(target, field, "") or "").strip():
             setattr(target, field, str(value).strip())
     stored = safe_json(target.extracted_json)
+    if received and (
+        not target.email_received_at or received > target.email_received_at
+    ):
+        stored.setdefault(
+            "initial_email_received_at",
+            target.email_received_at.isoformat() if target.email_received_at else "",
+        )
+        target.email_received_at = received
     stored.setdefault("followup_emails", []).append({
         "message_id": unique_id,
         "subject": subject,
         "received_at": received.isoformat() if received else "",
         "action": action,
     })
+    if details.get("correction_mail") or details.get("correction_request_mail"):
+        target.status = "Correction Pending"
+    elif details.get("system_pending_mail"):
+        target.status = "System Pending - Action Required"
+    elif mark_for_review:
+        target.status = "Existing Case - New Mail Review"
     target.extracted_json = json.dumps(stored, ensure_ascii=False)
     db.session.commit()
     store_email_attachments(target, attachments)
@@ -1047,10 +1062,12 @@ def apply_followup_to_existing_case(
 
 
 def email_case_status(details):
+    if details.get("correction_mail") or details.get("correction_request_mail"):
+        return "Correction Pending"
+    if details.get("system_pending_mail"):
+        return "System Pending - Action Required"
     if details.get("portal_case"):
         return "Portal Pending"
-    if details.get("correction_mail"):
-        return "Correction Pending"
     required = (
         details.get("application_number"),
         details.get("customer_name"),
@@ -1134,6 +1151,7 @@ def apply_email_details(case, details, account, subject, received, unique_id):
     email_managed_statuses = {
         "", "New", "New - Email", "Email Parsed - Review",
         "Correction Pending", "Portal Pending",
+        "System Pending - Action Required",
         "Ignored - Not Valuation Email",
         "Ignored - Follow-up Without Initiation",
     }
@@ -1300,7 +1318,12 @@ def enrich_missing_address_from_email_document(details, mail, msg_id):
         extension = Path(item["filename"]).suffix.casefold()
         if extension not in {".pdf", ".docx", ".xlsx", ".xlsm"}:
             continue
-        text = extract_basic_text(item["filename"], item["content"])
+        # Scheduled MIS fetch must stay below the production worker's memory
+        # limit. Searchable document text is enough for an address fallback;
+        # scanned-file OCR remains available in the explicit report workflow.
+        text = extract_basic_text(
+            item["filename"], item["content"], allow_ocr=False
+        )
         if text:
             readable.append((item["filename"], text))
     return enrich_email_details_from_attachments(details, readable)
@@ -1364,7 +1387,10 @@ def recover_structured_archived_cases(account, start_date, end_date):
     return sum(1 for case in candidates if recover_archived_assignment(case))
 
 
-def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
+def fetch_email_account(
+    account: EmailAccount, start_date=None, end_date=None,
+    enrich_documents=True,
+):
     created = 0
     updated = 0
     ignored = 0
@@ -1485,7 +1511,11 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
             # Stay fast for normal mail. Only when the address is absent, read
             # supported documents temporarily and discard their bytes after
             # extracting MIS text. Nothing is saved as a FileAsset.
-            if details.get("is_valuation", False) and not followup_mail:
+            if (
+                enrich_documents
+                and details.get("is_valuation", False)
+                and not followup_mail
+            ):
                 if mail.select(source_folder)[0] == "OK":
                     details = enrich_missing_address_from_email_document(
                         details, mail, msg_id
@@ -1531,6 +1561,7 @@ def fetch_email_account(account: EmailAccount, start_date=None, end_date=None):
                 if apply_followup_to_existing_case(
                     duplicate_case, details, attachments, subject, received, unique_id,
                     action="Duplicate assignment merged into existing MIS case",
+                    mark_for_review=True,
                 ):
                     updated += 1
                 continue
@@ -1582,7 +1613,7 @@ def classify_photo(filename: str) -> str:
     return "Other Site Photo"
 
 
-def extract_basic_text(filename: str, content: bytes) -> str:
+def extract_basic_text(filename: str, content: bytes, allow_ocr=True) -> str:
     ext = Path(filename).suffix.lower()
     try:
         if ext == ".pdf":
@@ -1590,9 +1621,9 @@ def extract_basic_text(filename: str, content: bytes) -> str:
             text = "\n".join((page.extract_text() or "") for page in reader.pages)[:50000]
             if len(re.sub(r"\s+", "", text)) >= 80:
                 return text
-            return offline_ocr_text(filename, content) or text
+            return (offline_ocr_text(filename, content) or text) if allow_ocr else text
         if ext in PHOTO_EXTENSIONS:
-            return offline_ocr_text(filename, content)
+            return offline_ocr_text(filename, content) if allow_ocr else ""
         if ext == ".docx":
             document = Document(io.BytesIO(content))
             output = [p.text for p in document.paragraphs if p.text.strip()]
@@ -3755,7 +3786,12 @@ def scheduled_email_fetch():
                 # of every hour, scan the whole month as a catch-up so delayed
                 # indexing or service sleep cannot leave a valuation mail out.
                 start_date = month_start if full_catchup else today
-                result = fetch_email_account(account, start_date, today)
+                # The minute scheduler is for reliable case capture, not heavy
+                # attachment processing. Full documents remain available to a
+                # user-triggered fetch/report flow when missing fields matter.
+                result = fetch_email_account(
+                    account, start_date, today, enrich_documents=False
+                )
                 app.logger.info(
                     "Scheduled MIS fetch completed for %s (%s to %s): %s new, %s updated",
                     account.email,

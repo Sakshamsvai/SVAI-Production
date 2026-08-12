@@ -419,6 +419,12 @@ def deterministic_email_candidate(subject, body, sender=""):
         and any(term in text for term in ("applicant", "borrower", "customer"))
         and any(term in text for term in CASE_TERMS)
     )
+    operational_case_request = bool(re.search(
+        r"(?i)\b(?:system\s+(?:is\s+)?pending|pending\s+(?:in|on)\s+(?:the\s+)?system|"
+        r"(?:do|update|complete|process|initiate|correct)\s+(?:it|this|the\s+case)?\s*"
+        r"(?:in|on)\s+(?:the\s+)?system|system\s+m[ei]\s+kar\s+do)\b",
+        text,
+    ))
     explicit_identity = any(term in text for term in (
         "applicant", "borrower", "customer", "property address", "site address",
         "collateral address", "branch name",
@@ -433,6 +439,7 @@ def deterministic_email_candidate(subject, body, sender=""):
     strong_assignment = (
         assignment_hits > 0 or subject_structure or structured_task
         or (identifiers and action_hits > 0)
+        or (identifiers and operational_case_request)
         or (action_hits > 0 and case_hits > 0 and explicit_identity)
         or named_property_case
     )
@@ -454,6 +461,11 @@ def deterministic_email_candidate(subject, body, sender=""):
                 identifiers
                 and (property_identity or known_bank_signal)
                 and (action_hits > 0 or case_hits > 0)
+            )
+            or (
+                identifiers
+                and operational_case_request
+                and (property_identity or known_bank_signal or case_hits > 0)
             )
         )
     return True
@@ -744,6 +756,21 @@ def regex_email_extract(subject, body, sender):
         explicit_case_type or _normalize_case_type(text) or result.get("case_type")
     )
     is_valuation = deterministic_email_candidate(subject, body, sender)
+    system_pending_mail = bool(re.search(
+        r"(?i)\b(?:system\s+(?:is\s+)?pending|pending\s+(?:in|on)\s+(?:the\s+)?system|"
+        r"(?:do|update|complete|process|initiate|correct)\s+(?:it|this|the\s+case)?\s*"
+        r"(?:in|on)\s+(?:the\s+)?system|system\s+m[ei]\s+kar\s+do)\b",
+        text,
+    ))
+    correction_mail = bool(re.search(
+        r"(?i)\b(?:change\s+application\s+id|correct\s+application\s+(?:no|number))\b",
+        text,
+    ))
+    correction_request_mail = bool(re.search(
+        r"(?i)\b(?:(?:case|application|technical|valuation)\s+"
+        r"(?:correction|required\s+correction)|correction\s+(?:required|needed|mail))\b",
+        text,
+    ))
     result.update({
         "bank_name": _bank_from_sender(sender),
         "is_valuation": is_valuation,
@@ -753,10 +780,9 @@ def regex_email_extract(subject, body, sender):
             if _sender_domain(sender) in PUBLIC_MAIL_DOMAINS
             else "No genuine valuation/technical assignment pattern matched"
         ),
-        "correction_mail": bool(re.search(
-            r"(?i)change\s+application\s+id|correct\s+application\s+(?:no|number)",
-            text,
-        )),
+        "correction_mail": correction_mail,
+        "correction_request_mail": correction_request_mail,
+        "system_pending_mail": system_pending_mail,
         "portal_case": bool(re.search(
             r"(?i)\b(?:online\s+)?portal\b|vendor\s+dashboard|"
             r"technical\s+case\s+assignment|click\s+(?:on\s+)?the\s+link\s+to\s+upload",

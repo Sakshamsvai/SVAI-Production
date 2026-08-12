@@ -46,7 +46,8 @@ from server import (  # noqa: E402
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
     email_fetch_folders, mis_import_rows,
     concise_mis_address, mailbox_source, normalize_whatsapp_group_link,
-    fetch_email_account, fetch_full_message, fetch_mis_message, imap_safe_assignment_folders,
+    fetch_email_account, fetch_full_message, fetch_mis_message,
+    enrich_missing_address_from_email_document, imap_safe_assignment_folders,
     archived_case_has_assignment_identity, recover_structured_archived_cases,
 )
 
@@ -968,6 +969,31 @@ class SvaiSmokeTests(unittest.TestCase):
             "LAP20260091",
         )
 
+        system_pending_subject = "Technical case LAP-2026-0091 - system pending"
+        system_pending_body = "Application No: LAP-2026-0091\nPlease system me kar do."
+        self.assertTrue(deterministic_email_candidate(
+            system_pending_subject, system_pending_body, "credit@samplebank.com"
+        ))
+        system_pending = regex_email_extract(
+            system_pending_subject, system_pending_body, "credit@samplebank.com"
+        )
+        self.assertTrue(system_pending["is_valuation"])
+        self.assertTrue(system_pending["system_pending_mail"])
+
+        correction = regex_email_extract(
+            "Correction required - Application No LAP-2026-0092",
+            "Technical case correction required for Application No: LAP-2026-0092",
+            "credit@samplebank.com",
+        )
+        self.assertTrue(correction["is_valuation"])
+        self.assertTrue(correction["correction_request_mail"])
+        self.assertFalse(correction["correction_mail"])
+
+        self.assertFalse(deterministic_email_candidate(
+            "Monthly work pending", "Please update it in the system.",
+            "somebody@yahoo.com",
+        ))
+
         muthoot_subject = "Task TSR - Audit Initiation -GWA-PRO-003294GWALIOR (Sanjay Yadav)"
         self.assertTrue(deterministic_email_candidate(muthoot_subject, "Audit task initiated."))
         muthoot = regex_email_extract(
@@ -1174,6 +1200,41 @@ class SvaiSmokeTests(unittest.TestCase):
                 case, {}, [], "Repeated fetch", None, "<followup@example.com>"
             ))
 
+    def test_later_same_application_mail_updates_mis_date_and_action_status(self):
+        with app.app_context():
+            original = datetime(2026, 8, 11, 10, 0)
+            latest = datetime(2026, 8, 12, 9, 30)
+            case = ValuationCase(
+                application_number="LAP-2026-0012",
+                customer_name="Existing Customer",
+                case_type="Fresh",
+                status="New - Email",
+                email_received_at=original,
+                source_message_id="<original@example.com>",
+            )
+            db.session.add(case)
+            db.session.commit()
+
+            changed = apply_followup_to_existing_case(
+                case,
+                {
+                    "application_number": "LAP-2026-0012",
+                    "system_pending_mail": True,
+                },
+                [],
+                "Re: LAP-2026-0012 - system pending",
+                latest,
+                "<system-pending@example.com>",
+                mark_for_review=True,
+            )
+
+            self.assertTrue(changed)
+            self.assertEqual(case.email_received_at, latest)
+            self.assertEqual(case.status, "System Pending - Action Required")
+            stored = safe_json(case.extracted_json)
+            self.assertEqual(stored["initial_email_received_at"], original.isoformat())
+            self.assertEqual(len(stored["followup_emails"]), 1)
+
     def test_real_bank_subject_patterns_and_signature_are_parsed_safely(self):
         bajaj = regex_email_extract(
             "Re: Technical INITIATION // H425HLD1885354 // AMAN AGRAWAL // "
@@ -1368,6 +1429,34 @@ class SvaiSmokeTests(unittest.TestCase):
             "Attached construction estimate and drawing.",
             "sender@ummeedhfc.com",
         ))
+
+    def test_scheduled_email_enrichment_does_not_start_heavy_ocr(self):
+        with patch("server.fetch_full_message") as fetch_full, patch(
+            "server.offline_ocr_text"
+        ) as ocr:
+            fetch_full.return_value = (
+                b"From: credit@samplebank.com\r\n"
+                b"Subject: Application No LAP-2026-0099\r\n"
+                b"MIME-Version: 1.0\r\n"
+                b"Content-Type: application/pdf; name=scan.pdf\r\n"
+                b"Content-Disposition: attachment; filename=scan.pdf\r\n"
+                b"Content-Transfer-Encoding: base64\r\n\r\n"
+                b"JVBERi0xLjQKJSVFT0Y=\r\n"
+            )
+            result = enrich_missing_address_from_email_document(
+                {"application_number": "LAP-2026-0099"}, object(), b"1"
+            )
+            self.assertEqual(result["application_number"], "LAP-2026-0099")
+            ocr.assert_not_called()
+
+    def test_fast_fetch_mode_skips_full_document_download(self):
+        import inspect
+
+        signature = inspect.signature(fetch_email_account)
+        self.assertIn("enrich_documents", signature.parameters)
+        self.assertTrue(signature.parameters["enrich_documents"].default)
+        source = inspect.getsource(__import__("server").scheduled_email_fetch)
+        self.assertIn("enrich_documents=False", source)
 
     def test_additional_real_initiation_and_portal_patterns(self):
         fusion = regex_email_extract(
