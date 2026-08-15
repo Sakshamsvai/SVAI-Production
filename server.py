@@ -1918,11 +1918,11 @@ def store_asset(
     text = ""
     extraction = {}
     if asset_type in {"document", "visit_data"}:
-        # Upload must stay lightweight on the 512 MB web worker. Scanned-image
-        # OCR loads a large local ONNX model, so run it only during the explicit
-        # processing action, never while the user is uploading/saving files.
-        text = extract_basic_text(filename, content, allow_ocr=process_ai)
         if process_ai:
+            # Upload must stay lightweight on the 512 MB web worker. Even text
+            # extraction can inflate compressed/scanned PDFs far beyond their
+            # file size. Parse and OCR only during the explicit AI action.
+            text = extract_basic_text(filename, content, allow_ocr=True)
             extraction = ai_extract_document(filename, content, text, source_kind)
     elif asset_type == "photo":
         category = category or classify_photo(filename)

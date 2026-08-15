@@ -102,7 +102,9 @@ class SvaiSmokeTests(unittest.TestCase):
             db.session.add(case)
             db.session.commit()
             case_id = case.id
-        with patch("server.offline_ocr_text") as ocr:
+        with patch("server.extract_basic_text") as text_extract, patch(
+            "server.offline_ocr_text"
+        ) as ocr:
             response = self.client.post(
                 f"/cases/{case_id}/upload/documents",
                 data={
@@ -112,6 +114,7 @@ class SvaiSmokeTests(unittest.TestCase):
                 content_type="multipart/form-data",
             )
         self.assertEqual(response.status_code, 302)
+        text_extract.assert_not_called()
         ocr.assert_not_called()
 
     def test_gmail_lifc_fallback_error_keeps_standard_scan_results(self):
