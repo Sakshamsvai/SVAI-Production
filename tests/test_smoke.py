@@ -53,6 +53,7 @@ from server import (  # noqa: E402
     enrich_missing_address_from_email_document, imap_safe_assignment_folders,
     archived_case_has_assignment_identity, recover_structured_archived_cases,
     staff_payment_amounts, staff_names_from_workbook,
+    read_upload_limited,
 )
 
 
@@ -85,6 +86,33 @@ class SvaiSmokeTests(unittest.TestCase):
         response = self.login()
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers["Location"], "/")
+
+    def test_oversized_single_upload_is_rejected_before_database_storage(self):
+        class Upload:
+            filename = "oversized-photo.jpg"
+            stream = io.BytesIO(b"x" * (12 * 1024 * 1024 + 1))
+
+        with self.assertRaisesRegex(ValueError, "keep each file under 12 MB"):
+            read_upload_limited(Upload())
+
+    def test_manual_upload_does_not_load_local_ocr_model(self):
+        self.login()
+        with app.app_context():
+            case = ValuationCase(application_number="NO-OCR-UPLOAD-001")
+            db.session.add(case)
+            db.session.commit()
+            case_id = case.id
+        with patch("server.offline_ocr_text") as ocr:
+            response = self.client.post(
+                f"/cases/{case_id}/upload/documents",
+                data={
+                    "_csrf_token": self.csrf(),
+                    "files": (io.BytesIO(b"scanned-property-image"), "registry.jpg"),
+                },
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(response.status_code, 302)
+        ocr.assert_not_called()
 
     def test_gmail_lifc_fallback_error_keeps_standard_scan_results(self):
         """A malformed Gmail-only fallback must not stop normal IMAP import."""

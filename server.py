@@ -78,7 +78,7 @@ if database_url.startswith("postgresql+"):
         "pool_pre_ping": True,
         "pool_recycle": 280,
     }
-app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_MB", "50")) * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_MB", "20")) * 1024 * 1024
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
@@ -1918,7 +1918,10 @@ def store_asset(
     text = ""
     extraction = {}
     if asset_type in {"document", "visit_data"}:
-        text = extract_basic_text(filename, content)
+        # Upload must stay lightweight on the 512 MB web worker. Scanned-image
+        # OCR loads a large local ONNX model, so run it only during the explicit
+        # processing action, never while the user is uploading/saving files.
+        text = extract_basic_text(filename, content, allow_ocr=process_ai)
         if process_ai:
             extraction = ai_extract_document(filename, content, text, source_kind)
     elif asset_type == "photo":
@@ -1940,7 +1943,8 @@ def store_asset(
 
 def safe_zip_members(zf):
     max_files = int(os.getenv("MAX_ZIP_FILES", "250"))
-    max_uncompressed = int(os.getenv("MAX_ZIP_UNCOMPRESSED_MB", "100")) * 1024 * 1024
+    max_uncompressed = int(os.getenv("MAX_ZIP_UNCOMPRESSED_MB", "40")) * 1024 * 1024
+    max_single = int(os.getenv("MAX_SINGLE_UPLOAD_MB", "12")) * 1024 * 1024
     accepted = 0
     total_size = 0
     for member in zf.infolist():
@@ -1949,9 +1953,25 @@ def safe_zip_members(zf):
             continue
         accepted += 1
         total_size += member.file_size
+        if member.file_size > max_single:
+            raise ValueError(
+                f"{Path(member.filename).name} is too large; keep each file under "
+                f"{max_single // (1024 * 1024)} MB."
+            )
         if accepted > max_files or total_size > max_uncompressed:
             raise ValueError("ZIP is too large after extraction.")
         yield member
+
+
+def read_upload_limited(item):
+    max_bytes = int(os.getenv("MAX_SINGLE_UPLOAD_MB", "12")) * 1024 * 1024
+    content = item.stream.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise ValueError(
+            f"{secure_filename(item.filename)} is too large; keep each file under "
+            f"{max_bytes // (1024 * 1024)} MB."
+        )
+    return content
 
 
 def valuation_calculation(form):
@@ -3012,11 +3032,14 @@ def handle_case_upload(case_id, upload_kind):
         if not item or not item.filename:
             continue
         filename = secure_filename(item.filename)
-        content = item.read()
         ext = Path(filename).suffix.lower()
         if ext == ".zip":
             try:
-                with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                # Werkzeug already spools larger requests to a temporary file.
+                # Read ZIP members directly from that stream instead of keeping
+                # a second full compressed copy in the 512 MB web worker.
+                item.stream.seek(0)
+                with zipfile.ZipFile(item.stream) as zf:
                     for member in safe_zip_members(zf):
                         inner_name = secure_filename(Path(member.filename).name)
                         inner_ext = Path(inner_name).suffix.lower()
@@ -3045,6 +3068,11 @@ def handle_case_upload(case_id, upload_kind):
                 message = str(exc) if isinstance(exc, ValueError) else "File is not a valid ZIP."
                 flash(f"{filename}: {message}", "error")
         elif ext in PHOTO_EXTENSIONS:
+            try:
+                content = read_upload_limited(item)
+            except ValueError as exc:
+                flash(str(exc), "error")
+                continue
             if upload_kind == "documents":
                 asset_type = "document"
             elif upload_kind == "visit_form":
@@ -3062,6 +3090,11 @@ def handle_case_upload(case_id, upload_kind):
             )
             count += 1
         elif ext in DOCUMENT_EXTENSIONS:
+            try:
+                content = read_upload_limited(item)
+            except ValueError as exc:
+                flash(str(exc), "error")
+                continue
             page_number += 1
             store_asset(
                 case_id, default_type, filename, content, item.mimetype,
@@ -3072,6 +3105,8 @@ def handle_case_upload(case_id, upload_kind):
                 source_kind=source_kind, process_ai=False,
             )
             count += 1
+        db.session.expire_all()
+        gc.collect()
     if count:
         case.status = "Files Uploaded - AI Pending"
         db.session.commit()
