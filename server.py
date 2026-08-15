@@ -1220,6 +1220,47 @@ def apply_followup_to_existing_case(
     return True
 
 
+FOLLOWUP_ONLY_STATUSES = {
+    "Correction Pending",
+    "System Pending - Action Required",
+    "Existing Case - New Mail Review",
+}
+
+
+def clean_non_billing_followups():
+    """Repair legacy follow-up mutations and hide standalone action mails."""
+    changed = 0
+    candidates = ValuationCase.query.filter(
+        ValuationCase.archived.is_(False),
+        ValuationCase.source_email.isnot(None),
+    ).all()
+    for case in candidates:
+        stored = safe_json(case.extracted_json)
+        followups = stored.get("followup_emails", [])
+        initial_received = stored.get("initial_email_received_at", "")
+        if followups and initial_received:
+            try:
+                restored = datetime.fromisoformat(initial_received)
+            except (TypeError, ValueError):
+                restored = None
+            if restored and case.email_received_at != restored:
+                case.email_received_at = restored
+                changed += 1
+        if followups and case.status in FOLLOWUP_ONLY_STATUSES:
+            complete = bool(case.application_number and case.customer_name and case.case_type)
+            case.status = "New - Email" if complete else "Email Parsed - Review"
+            changed += 1
+        elif not followups and case.status in FOLLOWUP_ONLY_STATUSES:
+            # This row was created from a correction/system-action message
+            # itself. It is audit mail, not a billable valuation assignment.
+            case.archived = True
+            case.status = "Non-billing follow-up email"
+            changed += 1
+    if changed:
+        db.session.commit()
+    return changed
+
+
 def email_case_status(details):
     if details.get("correction_mail") or details.get("correction_request_mail"):
         return "Correction Pending"
@@ -1694,20 +1735,32 @@ def _fetch_email_account_unlocked(
                 ignored += 1
                 continue
 
+            non_billing_followup = bool(
+                followup_mail
+                or details.get("correction_mail")
+                or details.get("correction_request_mail")
+                or details.get("system_pending_mail")
+            )
+
             # Stay fast for normal mail. Only when the address is absent, read
             # supported documents temporarily and discard their bytes after
             # extracting MIS text. Nothing is saved as a FileAsset.
             if (
                 enrich_documents
                 and details.get("is_valuation", False)
-                and not followup_mail
+                and not non_billing_followup
             ):
                 details = enrich_missing_address_from_email_document(
                     details, mail, msg_id
                 )
             attachments = []
             details.pop("ai_error", None)
-            if followup_mail:
+            if details.get("correction_mail") and apply_application_correction(
+                details, existing_case, attachments
+            ):
+                updated += 1
+                continue
+            if non_billing_followup:
                 if existing_case and _message_already_recorded(
                     existing_case, unique_id
                 ):
@@ -1728,10 +1781,6 @@ def _fetch_email_account_unlocked(
             if not details.get("is_valuation", False):
                 ignored += 1
                 continue
-            if apply_application_correction(details, existing_case, attachments):
-                updated += 1
-                continue
-
             duplicate_case = existing_case or existing_case_for_duplicate_assignment(
                 details, account, subject, received
             )
@@ -1761,6 +1810,7 @@ def _fetch_email_account_unlocked(
             else:
                 created += 1
         updated += recover_structured_archived_cases(account, start_date, end_date)
+        updated += clean_non_billing_followups()
         account.last_fetch_at = datetime.utcnow()
         db.session.commit()
         deduplicated = merge_cross_mailbox_duplicate_cases()
@@ -2516,6 +2566,7 @@ def filter_cases_by_dates(query, start_date, end_date):
 @app.route("/")
 @login_required
 def dashboard():
+    clean_non_billing_followups()
     search = request.args.get("q", "").strip()
     include_archived = request.args.get("archived") == "1"
     default_from, default_to = current_month_range()

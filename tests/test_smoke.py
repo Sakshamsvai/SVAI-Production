@@ -42,6 +42,7 @@ from server import (  # noqa: E402
     BillingTemplate, EmailAccount, FileAsset, SiteEngineer, WhatsAppGroup, User, ValuationCase,
     StaffPaymentProfile, StaffMonthlyPayment, app, apply_email_details,
     apply_followup_to_existing_case, db, encrypt_password, is_followup_email,
+    clean_non_billing_followups,
     existing_case_for_duplicate_assignment, normalized_application_number,
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
@@ -1347,6 +1348,37 @@ class SvaiSmokeTests(unittest.TestCase):
             self.assertEqual(case.status, "New - Email")
             stored = safe_json(case.extracted_json)
             self.assertEqual(len(stored["followup_emails"]), 1)
+
+    def test_legacy_followup_rows_are_repaired_or_hidden_from_billing_mis(self):
+        with app.app_context():
+            original = datetime(2026, 8, 10, 8, 0)
+            later = datetime(2026, 8, 15, 9, 0)
+            assignment = ValuationCase(
+                application_number="CLEAN-2026-001",
+                customer_name="Billing Customer",
+                case_type="Fresh",
+                status="Correction Pending",
+                email_received_at=later,
+                source_email="valuer@example.com",
+                extracted_json=json.dumps({
+                    "initial_email_received_at": original.isoformat(),
+                    "followup_emails": [{"message_id": "<correction@example.com>"}],
+                }),
+            )
+            correction_only = ValuationCase(
+                application_number="CLEAN-2026-002",
+                status="Correction Pending",
+                source_email="valuer@example.com",
+            )
+            db.session.add_all([assignment, correction_only])
+            db.session.commit()
+
+            self.assertGreaterEqual(clean_non_billing_followups(), 2)
+            self.assertEqual(assignment.email_received_at, original)
+            self.assertEqual(assignment.status, "New - Email")
+            self.assertFalse(assignment.archived)
+            self.assertTrue(correction_only.archived)
+            self.assertEqual(correction_only.status, "Non-billing follow-up email")
 
     def test_real_bank_subject_patterns_and_signature_are_parsed_safely(self):
         bajaj = regex_email_extract(
