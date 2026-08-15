@@ -3964,17 +3964,24 @@ def generate_report(case_id):
     # Generate must never silently create a blank report when the operator
     # forgot to press "Process All Files" first. Process current inputs here
     # and rebuild the source-separated profile before filling the template.
+    stored_before = safe_json(case.extracted_json)
+    reviewed_profile = stored_before.get("case_profile", {})
+    source_reviewed = bool(reviewed_profile.get("source_reviewed"))
     document_extractions = []
     visit_extractions = []
     for asset in assets:
         inferred_type, inferred_source = quick_asset_type(asset.filename)
         if asset.asset_type == "document" and inferred_type == "visit_data":
             asset.asset_type = "visit_data"
-        if asset.asset_type == "photo" and not asset.extraction_json:
+        if asset.asset_type == "photo" and not asset.extraction_json and not source_reviewed:
             result = classify_property_photo(asset.filename, asset.content)
             asset.category = result.get("category", "Other Site Photo")
             asset.extraction_json = json.dumps(result, ensure_ascii=False)
-        elif asset.asset_type in {"document", "visit_data"} and not asset.extraction_json:
+        elif (
+            asset.asset_type in {"document", "visit_data"}
+            and not asset.extraction_json
+            and not source_reviewed
+        ):
             source_kind = "visit_data" if asset.asset_type == "visit_data" else inferred_source
             asset.extracted_text = asset.extracted_text or extract_basic_text(
                 asset.filename, asset.content
@@ -3989,14 +3996,12 @@ def generate_report(case_id):
         elif asset.asset_type == "visit_data" and extraction:
             visit_extractions.append(extraction)
         db.session.add(asset)
-    stored_before = safe_json(case.extracted_json)
     email_data = stored_before.get(
         "email", stored_before if "application_number" in stored_before else {}
     )
     refreshed_profile = build_case_profile(
         email_data, document_extractions, visit_extractions, valuation_as_dict(valuation)
     )
-    reviewed_profile = stored_before.get("case_profile", {})
     if reviewed_profile.get("source_reviewed"):
         for field in SOURCE_REVIEW_FIELDS:
             if field in reviewed_profile:
