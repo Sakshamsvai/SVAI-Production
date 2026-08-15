@@ -75,6 +75,22 @@ def pdf_photos(filename, content, asset_type):
     return output
 
 
+def save_to_local_reports(content, filename):
+    downloads = Path(os.getenv(
+        "SVAI_LOCAL_REPORT_DIR",
+        str(Path(__file__).resolve().parent / "Generated Reports Local"),
+    ))
+    downloads.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(filename).name or "SVAI_Local_Report.xlsx"
+    target = downloads / safe_name
+    counter = 2
+    while target.exists():
+        target = downloads / f"{Path(safe_name).stem} ({counter}){Path(safe_name).suffix}"
+        counter += 1
+    target.write_bytes(content)
+    return target
+
+
 @app.route("/generate", methods=["POST", "OPTIONS"])
 def generate():
     if request.method == "OPTIONS":
@@ -121,9 +137,15 @@ def generate():
             extension = ".xlsx"
             mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     filename = request.form.get("report_name") or f"SVAI_Local_Report{extension}"
-    return send_file(
+    saved_path = save_to_local_reports(output, filename)
+    response = send_file(
         io.BytesIO(output), as_attachment=True, download_name=filename, mimetype=mime
     )
+    response.headers["X-SVAI-Local-Saved"] = str(saved_path)
+    response.headers["Access-Control-Expose-Headers"] = (
+        "Content-Disposition, X-SVAI-Local-Saved"
+    )
+    return response
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ instance/
 uploads/
 outputs/
 demo_outputs/
+Generated Reports Local/
 artifact_work/
 *.db
 *.sqlite
