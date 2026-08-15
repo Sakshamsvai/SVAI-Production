@@ -213,8 +213,12 @@ KNOWN_CELL_MAPPINGS = {
         "B9": ("case_type",),
         "D9": ("contact_number",),
         "B11": ("property_address_as_per_site",),
+        "F11": ("address_match_status",),
         "B12": ("property_address_as_per_docs", "property_address"),
+        "D13": ("house_number",),
         "F13": ("survey_khasra_plot_no_as_per_docs", "survey_khasra_plot_no"),
+        "F14": ("street_name",),
+        "B15": ("floor_number",),
         "D15": ("survey_khasra_plot_no_as_per_docs", "survey_khasra_plot_no"),
         "B16": ("village",),
         "D16": ("ward_number",),
@@ -245,6 +249,14 @@ KNOWN_CELL_MAPPINGS = {
         "D41": ("person_met",),
         "F41": ("road_width",),
         "B42": ("owner_name",),
+        "D42": ("relation_with_person_met",),
+        "F42": ("dwelling_unit_type", "property_usage_as_per_site"),
+        "B43": ("number_of_tenants",),
+        "D43": ("property_identification_status",),
+        "F43": ("property_completion_status",),
+        "B44": ("person_met_contact",),
+        "D44": ("negative_area",),
+        "F44": ("community_dominated_area",),
         "C55": ("builtup_area_as_per_site", "builtup_area"),
         "C56": ("builtup_area_as_per_docs",),
         "C57": ("builtup_area_as_per_site", "builtup_area"),
@@ -252,12 +264,18 @@ KNOWN_CELL_MAPPINGS = {
         "B62": ("land_area_as_per_docs", "land_area"),
         "C62": ("land_area_as_per_site", "land_area"),
         "D62": ("land_area_as_per_site", "land_area"),
+        "F62": ("site_dimension_remarks",),
         "C64": ("builtup_area_as_per_site", "builtup_area"),
         "D64": ("builtup_area_as_per_site", "builtup_area"),
         "C68": ("land_area_as_per_site", "land_area"),
         "D68": ("land_rate",),
         "C69": ("builtup_area_as_per_site", "builtup_area"),
         "D69": ("construction_rate",),
+        "D72": ("valuation_method",),
+        "D73": ("completion_percentage",),
+        "C79": ("marketability",),
+        "C80": ("surrounding_development_status",),
+        "F80": ("occupancy_level",),
         "B82": ("remarks",),
         "B83": ("_blank",),
         "B84": ("_blank",),
@@ -308,7 +326,8 @@ KNOWN_CLEAR_CELLS = {
     },
     "sbfc": {
         "C47", "D47", "C48", "D48", "C49", "D49", "C50", "D50", "C51",
-        "D51", "C52",
+        "D51", "C52", "B35", "C35", "D35", "E35", "F11", "D13", "F14",
+        "B15", "E44", "F62", "C63", "D63", "C79", "C80", "F80",
     },
 }
 
@@ -592,11 +611,20 @@ EXCEL_PHOTO_LAYOUTS = {
         "sheet": "Table 1",
         "remove_after_row": 1,
         "slots": [
-            ("A118", 240, 230), ("C118", 240, 230), ("E118", 240, 230),
-            ("A129", 240, 230), ("C129", 240, 230), ("E129", 240, 230),
-            ("A140", 240, 230), ("C140", 240, 230), ("E140", 240, 230),
-            ("A149", 240, 210), ("C149", 240, 210), ("E149", 240, 210),
-            ("A161", 360, 300), ("D161", 360, 300), ("A96", 700, 290),
+            ("A118", 240, 230, "Front Elevation"),
+            ("C118", 240, 230, "Front Side View"),
+            ("E118", 240, 230, "Internal Room"),
+            ("A129", 240, 230, "Approach Road"),
+            ("C129", 240, 230, "Distant Property View"),
+            ("E129", 240, 230, "Other Site Photo"),
+            ("A140", 240, 230, "Approach Road"),
+            ("C140", 240, 230, "Distant Property View"),
+            ("E140", 240, 230, "Property Selfie"),
+            ("A149", 240, 210, "Internal Room"),
+            ("C149", 240, 210, "Front Elevation"),
+            ("E149", 240, 210, "Other Site Photo"),
+            ("A96", 500, 290, ("Google Map", "Location Map")),
+            ("E96", 220, 290, "MP Kisan"),
         ],
     },
     "laxmi": {
@@ -658,14 +686,16 @@ def insert_excel_photos(workbook, photo_assets, template_name="", bank_name=""):
                 ),
                 None,
             )
-            if asset is None and requested not in ("Property Document", "Site Sketch", "Location Map"):
+            if asset is None and requested not in (
+                "Property Document", "Site Sketch", "Location Map", "Google Map", "MP Kisan",
+            ):
                 asset = next(
                     (
                         candidate for candidate in photos
                         if (
                             id(candidate) not in used
                             and (candidate.get("category") or "") not in {
-                                "Property Document", "Site Sketch", "Location Map",
+                                "Property Document", "Site Sketch", "Location Map", "Google Map", "MP Kisan",
                             }
                         )
                     ),

@@ -105,6 +105,10 @@ def generate():
     document_extractions = []
     visit_extractions = []
     use_paid_ai = request.form.get("paid_ai") == "1"
+    source_dir = Path(__file__).resolve().parent / "Generated Reports Local" / (
+        f"{Path(request.form.get('report_name') or 'SVAI_Report').stem} Sources"
+    )
+    source_dir.mkdir(parents=True, exist_ok=True)
     for item in manifest:
         upload = request.files.get(item["field"])
         if not upload:
@@ -113,6 +117,7 @@ def generate():
         asset_type = item.get("asset_type", "")
         extension = Path(item.get("filename", "")).suffix.lower()
         filename = item.get("filename") or upload.filename
+        (source_dir / f"{item.get('field', 'asset')}_{Path(filename).name}").write_bytes(content)
         if use_paid_ai and asset_type in {"document", "visit_data"}:
             extraction = extract_property_asset(
                 filename, content, "",
