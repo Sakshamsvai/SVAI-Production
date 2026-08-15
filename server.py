@@ -2966,7 +2966,9 @@ def case_detail(case_id):
         document_ai_enabled=document_ai_enabled(),
         ai_model=OPENAI_MODEL, case_profile=safe_json(case.extracted_json),
         recommended_template=recommended_template,
-        report_mode=request.args.get("report") == "1",
+        # Report controls stay visible on every case page. Hiding them behind
+        # ?report=1 caused operators to press the heavier Process AI action.
+        report_mode=True,
     )
 
 

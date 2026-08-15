@@ -126,6 +126,17 @@ class SvaiSmokeTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 403)
 
+    def test_local_report_button_is_visible_on_normal_case_page(self):
+        self.login()
+        with app.app_context():
+            case = ValuationCase(application_number="VISIBLE-LOCAL-REPORT-001")
+            db.session.add(case)
+            db.session.commit()
+            case_id = case.id
+        response = self.client.get(f"/cases/{case_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Generate on This PC", response.data)
+
     def test_manual_upload_does_not_load_local_ocr_model(self):
         self.login()
         with app.app_context():

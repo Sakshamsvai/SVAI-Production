@@ -300,6 +300,9 @@ document.getElementById("local-report-button")?.addEventListener("click", async 
     button.disabled = false;
   }
 });
+if (new URLSearchParams(window.location.search).get("local_report") === "1") {
+  window.setTimeout(() => document.getElementById("local-report-button")?.click(), 500);
+}
 </script>
 {% endif %}
 {% endblock %}
