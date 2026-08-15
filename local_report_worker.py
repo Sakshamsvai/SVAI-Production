@@ -6,6 +6,11 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_file
 from pypdf import PdfReader
 
+from ai_service_openai import (
+    build_case_profile,
+    classify_property_photo,
+    extract_property_asset,
+)
 from report_service import fill_docx_template, fill_excel_template
 
 
@@ -97,6 +102,9 @@ def generate():
         return jsonify({"error": "Bank template missing."}), 400
     template_content = template.read()
     photos = []
+    document_extractions = []
+    visit_extractions = []
+    use_paid_ai = request.form.get("paid_ai") == "1"
     for item in manifest:
         upload = request.files.get(item["field"])
         if not upload:
@@ -105,19 +113,45 @@ def generate():
         asset_type = item.get("asset_type", "")
         extension = Path(item.get("filename", "")).suffix.lower()
         filename = item.get("filename") or upload.filename
+        if use_paid_ai and asset_type in {"document", "visit_data"}:
+            extraction = extract_property_asset(
+                filename, content, "",
+                "visit_data" if asset_type == "visit_data" else "property_document",
+            )
+            if asset_type == "visit_data":
+                visit_extractions.append(extraction)
+            else:
+                document_extractions.append(extraction)
         filename_key = Path(filename).stem.casefold().replace("_", " ").replace("-", " ")
         category_key = str(item.get("category") or "").casefold()
         is_google_map = "google map" in filename_key or "google map" in category_key
+        is_mp_kisan = any(token in filename_key or token in category_key for token in (
+            "mp kisan", "mp kishan", "kisan app", "kishan app",
+        ))
+        is_report_visit_image = is_google_map or is_mp_kisan
         if asset_type == "photo" or (
             asset_type == "visit_data"
             and extension in {".jpg", ".jpeg", ".png", ".webp"}
-            and is_google_map
+            and is_report_visit_image
         ):
+            photo_category = item.get("category") or "Other Site Photo"
+            if use_paid_ai and asset_type == "photo":
+                photo_category = classify_property_photo(filename, content).get(
+                    "category", photo_category
+                )
             photos.append({
                 "filename": filename,
-                "category": "Google Map" if is_google_map else (item.get("category") or "Other Site Photo"),
+                "category": (
+                    "Google Map" if is_google_map else
+                    "MP Kisan" if is_mp_kisan else
+                    photo_category
+                ),
                 "content": content,
             })
+    if use_paid_ai:
+        profile = build_case_profile(
+            profile, document_extractions, visit_extractions, {}
+        )
     extension = Path(template.filename).suffix.lower()
     if extension == ".docx":
         output = fill_docx_template(

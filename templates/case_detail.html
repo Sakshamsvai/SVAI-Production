@@ -243,6 +243,7 @@ document.getElementById("local-report-button")?.addEventListener("click", async 
   const button = this;
   const status = document.getElementById("local-report-status");
   const workerBase = "http://127.0.0.1:8765";
+  const query = new URLSearchParams(window.location.search);
   button.disabled = true;
   try {
     status.textContent = "Local worker check ho raha hai...";
@@ -258,6 +259,7 @@ document.getElementById("local-report-button")?.addEventListener("click", async 
     const form = new FormData();
     form.append("profile", JSON.stringify(info.profile));
     form.append("report_name", info.report_name);
+    if (query.get("paid_ai") === "1") form.append("paid_ai", "1");
     status.textContent = "Bank template laptop par aa raha hai...";
     const templateBlob = await (await fetch(info.template.url)).blob();
     form.append("template", templateBlob, info.template.filename);
@@ -284,6 +286,10 @@ document.getElementById("local-report-button")?.addEventListener("click", async 
     link.download = info.report_name;
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 30000);
+    if (query.get("local_only") === "1") {
+      status.textContent = "Paid AI se report laptop par ban kar save ho gayi.";
+      return;
+    }
     status.textContent = "Report laptop ke Downloads me save ho gayi. Live case copy save ho rahi hai...";
     const saveForm = new FormData();
     saveForm.append("report", reportBlob, info.report_name);
