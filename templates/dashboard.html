@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="stats">
-  <div class="stat"><span>Active Cases</span><b>{{ stats.cases }}</b></div>
+  <a class="stat stat-link" href="{{ url_for('dashboard') }}"><span>Billing MIS Cases</span><b>{{ stats.cases }}</b><small>Clean invoice-ready list</small></a>
+  <a class="stat stat-link" href="{{ url_for('dashboard', review='1') }}"><span>Needs Details</span><b>{{ stats.review_cases }}</b><small>Not included in MIS Excel</small></a>
   <a class="stat stat-link" href="{{ url_for('reports_page') }}"><span>Generated Reports</span><b>{{ stats.reports }}</b><small>Open, view case &amp; download</small></a>
 </section>
 
@@ -17,6 +18,7 @@
   </div>
 
   <form class="date-toolbar" method="get">
+    {% if show_review %}<input type="hidden" name="review" value="1">{% endif %}
     <label>From<input type="date" name="from" value="{{ date_from.isoformat() }}"></label>
     <label>To<input type="date" name="to" value="{{ date_to.isoformat() }}"></label>
     <label class="grow">Search<input name="q" value="{{ search }}" placeholder="Application no., customer, bank or address"></label>
@@ -44,7 +46,7 @@
   <div class="section-head">
     <div>
       <h2>{{ date_from.strftime('%d %b %Y') }} – {{ date_to.strftime('%d %b %Y') }}</h2>
-      <p>{{ cases|length }} case(s) shown</p>
+      <p>{{ 'Needs Details queue' if show_review else 'Clean billing MIS' }} · {{ cases|length }} case(s) shown</p>
     </div>
   </div>
   <div class="table-wrap">

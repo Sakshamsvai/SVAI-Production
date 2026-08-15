@@ -43,6 +43,7 @@ from server import (  # noqa: E402
     StaffPaymentProfile, StaffMonthlyPayment, app, apply_email_details,
     apply_followup_to_existing_case, db, encrypt_password, is_followup_email,
     clean_non_billing_followups,
+    filter_billing_ready_cases,
     existing_case_for_duplicate_assignment, normalized_application_number,
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
@@ -1379,6 +1380,31 @@ class SvaiSmokeTests(unittest.TestCase):
             self.assertFalse(assignment.archived)
             self.assertTrue(correction_only.archived)
             self.assertEqual(correction_only.status, "Non-billing follow-up email")
+
+    def test_incomplete_assignment_stays_in_review_queue_not_billing_mis(self):
+        with app.app_context():
+            ready = ValuationCase(
+                application_number="READY-2026-001",
+                customer_name="Ready Customer",
+                case_type="Fresh",
+                status="New - Email",
+            )
+            incomplete = ValuationCase(
+                customer_name="Incomplete Customer",
+                case_type="LAP",
+                status="Email Parsed - Review",
+            )
+            db.session.add_all([ready, incomplete])
+            db.session.commit()
+
+            billing_ids = {
+                item.id for item in filter_billing_ready_cases(
+                    ValuationCase.query.filter_by(archived=False)
+                ).all()
+            }
+            self.assertIn(ready.id, billing_ids)
+            self.assertNotIn(incomplete.id, billing_ids)
+            self.assertFalse(incomplete.archived)
 
     def test_real_bank_subject_patterns_and_signature_are_parsed_safely(self):
         bajaj = regex_email_extract(

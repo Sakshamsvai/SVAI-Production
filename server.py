@@ -2563,12 +2563,21 @@ def filter_cases_by_dates(query, start_date, end_date):
     ))
 
 
+def filter_billing_ready_cases(query):
+    """Keep incomplete assignments visible in Review Queue, not billing MIS."""
+    return query.filter(db.or_(
+        ValuationCase.status.is_(None),
+        ValuationCase.status != "Email Parsed - Review",
+    ))
+
+
 @app.route("/")
 @login_required
 def dashboard():
     clean_non_billing_followups()
     search = request.args.get("q", "").strip()
     include_archived = request.args.get("archived") == "1"
+    show_review = request.args.get("review") == "1"
     default_from, default_to = current_month_range()
     date_from = parse_iso_date(request.args.get("from"), default_from)
     date_to = parse_iso_date(request.args.get("to"), default_to)
@@ -2577,6 +2586,10 @@ def dashboard():
     query = ValuationCase.query
     if not include_archived:
         query = query.filter_by(archived=False)
+        if show_review:
+            query = query.filter(ValuationCase.status == "Email Parsed - Review")
+        else:
+            query = filter_billing_ready_cases(query)
     query = filter_cases_by_dates(query, date_from, date_to)
     if search:
         pattern = f"%{search}%"
@@ -2590,12 +2603,18 @@ def dashboard():
         db.func.coalesce(ValuationCase.email_received_at, ValuationCase.created_at).desc()
     ).limit(2000).all()
     stats = {
-        "cases": ValuationCase.query.filter_by(archived=False).count(),
+        "cases": filter_billing_ready_cases(
+            ValuationCase.query.filter_by(archived=False)
+        ).count(),
+        "review_cases": ValuationCase.query.filter_by(
+            archived=False, status="Email Parsed - Review"
+        ).count(),
         "reports": FileAsset.query.filter_by(asset_type="report").count(),
     }
     return render_template(
         "dashboard.html", cases=cases, stats=stats, search=search,
-        include_archived=include_archived, date_from=date_from, date_to=date_to,
+        include_archived=include_archived, show_review=show_review,
+        date_from=date_from, date_to=date_to,
         engineers=SiteEngineer.query.filter_by(active=True).order_by(SiteEngineer.name).all(),
         whatsapp_groups=WhatsAppGroup.query.filter_by(active=True).order_by(WhatsAppGroup.name).all(),
         ai_enabled=ai_enabled(), ai_model=OPENAI_MODEL,
@@ -4141,7 +4160,8 @@ def export_mis():
     date_from = parse_iso_date(request.args.get("from"), default_from)
     date_to = parse_iso_date(request.args.get("to"), default_to)
     query = filter_cases_by_dates(
-        ValuationCase.query.filter_by(archived=False), date_from, date_to
+        filter_billing_ready_cases(ValuationCase.query.filter_by(archived=False)),
+        date_from, date_to
     )
     cases = query.order_by(
         db.func.coalesce(ValuationCase.email_received_at, ValuationCase.created_at)
