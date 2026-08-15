@@ -4147,13 +4147,9 @@ def generate_report(case_id):
         content=output,
     )
     db.session.add(report)
-    # Uploaded case inputs are temporary working files.  The generated report
-    # keeps the final output; source facts already remain in the reviewed case
-    # profile, so remove bulky inputs after successful generation.
-    temporary_types = {"document", "photo", "visit_data", "case_template"}
-    for asset in assets:
-        if asset.asset_type in temporary_types:
-            db.session.delete(asset)
+    # Keep the uploaded registry, visit sheets and site photographs. Operators
+    # need those original sources for corrections and safe re-generation; a
+    # successful draft must not silently destroy the case working set.
     case.status = "Draft Report Generated"
     db.session.commit()
     return send_file(

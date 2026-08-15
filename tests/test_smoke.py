@@ -882,8 +882,8 @@ class SvaiSmokeTests(unittest.TestCase):
 
         with app.app_context():
             self.assertIsNotNone(ValuationCase.query.get(case_id))
-            self.assertEqual(FileAsset.query.filter_by(case_id=case_id, asset_type="photo").count(), 0)
-            self.assertEqual(FileAsset.query.filter_by(case_id=case_id, asset_type="document").count(), 0)
+            self.assertEqual(FileAsset.query.filter_by(case_id=case_id, asset_type="photo").count(), 1)
+            self.assertEqual(FileAsset.query.filter_by(case_id=case_id, asset_type="document").count(), 1)
             self.assertEqual(FileAsset.query.filter_by(case_id=case_id, asset_type="report").count(), 1)
         reports_page = self.client.get("/reports")
         self.assertEqual(reports_page.status_code, 200)
@@ -1820,7 +1820,15 @@ class SvaiSmokeTests(unittest.TestCase):
             self.assertEqual(case.status, "Draft Report Generated")
             self.assertEqual(
                 FileAsset.query.filter_by(case_id=case_id, asset_type="photo").count(),
-                0,
+                1,
+            )
+            self.assertEqual(
+                FileAsset.query.filter_by(case_id=case_id, asset_type="document").count(),
+                1,
+            )
+            self.assertEqual(
+                FileAsset.query.filter_by(case_id=case_id, asset_type="visit_data").count(),
+                1,
             )
 
     def test_unknown_uploaded_excel_keeps_structure_and_fills_in_place(self):
