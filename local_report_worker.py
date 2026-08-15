@@ -47,13 +47,10 @@ def pdf_photos(filename, content, asset_type):
     if Path(filename).suffix.lower() != ".pdf":
         return []
     name = Path(filename).stem.casefold()
-    property_document = any(token in name for token in (
-        "property_paper", "property paper", "registry", "sale_deed", "sale deed",
-    ))
     visit_source = asset_type == "visit_data" or any(
         token in name for token in ("visit", "inspection", "site_data", "site data")
     )
-    if not (property_document or visit_source):
+    if not visit_source:
         return []
     output = []
     reader = PdfReader(io.BytesIO(content))
@@ -64,9 +61,7 @@ def pdf_photos(filename, content, asset_type):
         largest = max(images, key=lambda item: len(item.data or b""))
         if len(largest.data or b"") < 10_000:
             continue
-        category = "Property Document" if property_document else (
-            "Front Elevation" if page_index == 0 else "Other Site Photo"
-        )
+        category = "Front Elevation" if page_index == 0 else "Other Site Photo"
         output.append({
             "filename": f"{Path(filename).stem}_page_{page_index + 1}_{largest.name}",
             "category": category,
@@ -109,14 +104,20 @@ def generate():
         content = upload.read()
         asset_type = item.get("asset_type", "")
         extension = Path(item.get("filename", "")).suffix.lower()
-        if asset_type == "photo" or extension in {".jpg", ".jpeg", ".png", ".webp"}:
+        filename = item.get("filename") or upload.filename
+        filename_key = Path(filename).stem.casefold().replace("_", " ").replace("-", " ")
+        category_key = str(item.get("category") or "").casefold()
+        is_google_map = "google map" in filename_key or "google map" in category_key
+        if asset_type == "photo" or (
+            asset_type == "visit_data"
+            and extension in {".jpg", ".jpeg", ".png", ".webp"}
+            and is_google_map
+        ):
             photos.append({
-                "filename": item.get("filename") or upload.filename,
-                "category": item.get("category") or "Other Site Photo",
+                "filename": filename,
+                "category": "Google Map" if is_google_map else (item.get("category") or "Other Site Photo"),
                 "content": content,
             })
-        elif extension == ".pdf":
-            photos.extend(pdf_photos(item.get("filename") or upload.filename, content, asset_type))
     extension = Path(template.filename).suffix.lower()
     if extension == ".docx":
         output = fill_docx_template(
