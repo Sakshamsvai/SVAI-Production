@@ -29,6 +29,7 @@ from flask import (
 from flask_sqlalchemy import SQLAlchemy
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 from pypdf import PdfReader
 from sqlalchemy.orm import defer
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -254,6 +255,44 @@ class BillingRatePlan(db.Model):
     branch_name = db.Column(db.String(180), default="")
     slabs_json = db.Column(db.Text, nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class StaffPaymentProfile(db.Model):
+    """Reusable salary/visit and petrol rules for one staff member or office item."""
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(180), unique=True, nullable=False, index=True)
+    category = db.Column(db.String(30), nullable=False, default="Staff")
+    payment_mode = db.Column(db.String(30), nullable=False, default="Per Visit")
+    fixed_salary = db.Column(db.Float, nullable=False, default=0)
+    visit_rate = db.Column(db.Float, nullable=False, default=0)
+    petrol_rate = db.Column(db.Float, nullable=False, default=0)
+    active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class StaffMonthlyPayment(db.Model):
+    """One billing-ready payment row per staff/profile and calendar month."""
+    id = db.Column(db.Integer, primary_key=True)
+    profile_id = db.Column(
+        db.Integer, db.ForeignKey("staff_payment_profile.id"), nullable=False, index=True
+    )
+    month = db.Column(db.String(7), nullable=False, index=True)
+    visits = db.Column(db.Integer, nullable=False, default=0)
+    km = db.Column(db.Float, nullable=False, default=0)
+    base_amount = db.Column(db.Float, nullable=False, default=0)
+    conveyance_amount = db.Column(db.Float, nullable=False, default=0)
+    advance_amount = db.Column(db.Float, nullable=False, default=0)
+    adjustment_amount = db.Column(db.Float, nullable=False, default=0)
+    final_amount = db.Column(db.Float, nullable=False, default=0)
+    status = db.Column(db.String(30), nullable=False, default="Pending")
+    notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    profile = db.relationship("StaffPaymentProfile")
+    __table_args__ = (
+        db.UniqueConstraint("profile_id", "month", name="uq_staff_payment_month"),
+    )
 
 
 class Valuation(db.Model):
@@ -569,6 +608,132 @@ def save_billing_slabs(bank_name, branch_name, slabs):
         plan = BillingRatePlan(bank_name=bank_name, branch_name=branch_name or "")
     plan.slabs_json = json.dumps(slabs)
     db.session.add(plan)
+
+
+def nonnegative_number(value, label, allow_negative=False):
+    try:
+        parsed = float(str(value or "0").strip() or 0)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} valid number hona chahiye.")
+    if not allow_negative and parsed < 0:
+        raise ValueError(f"{label} negative nahi ho sakta.")
+    return parsed
+
+
+def normalized_payment_month(value=None):
+    month = str(value or datetime.now(APP_TIMEZONE).strftime("%Y-%m")).strip()
+    try:
+        return datetime.strptime(month, "%Y-%m").strftime("%Y-%m")
+    except ValueError:
+        raise ValueError("Month YYYY-MM format me select karein.")
+
+
+def staff_payment_amounts(profile, visits=0, km=0, base_override="", advance=0, adjustment=0):
+    parsed_visits = nonnegative_number(visits, "Visits")
+    if not parsed_visits.is_integer():
+        raise ValueError("Visits whole number hona chahiye.")
+    visits = int(parsed_visits)
+    km = nonnegative_number(km, "KM")
+    advance = nonnegative_number(advance, "Advance")
+    adjustment = nonnegative_number(adjustment, "Adjustment", allow_negative=True)
+    override_text = str(base_override or "").strip()
+    if override_text:
+        base_amount = nonnegative_number(override_text, "Base amount")
+    elif profile.payment_mode == "Salary":
+        base_amount = profile.fixed_salary or 0
+    elif profile.payment_mode == "Per Visit":
+        base_amount = visits * (profile.visit_rate or 0)
+    else:
+        base_amount = 0
+    conveyance = km * (profile.petrol_rate or 0)
+    final_amount = base_amount + conveyance + adjustment - advance
+    return {
+        "visits": visits,
+        "km": km,
+        "base_amount": round(base_amount, 2),
+        "conveyance_amount": round(conveyance, 2),
+        "advance_amount": round(advance, 2),
+        "adjustment_amount": round(adjustment, 2),
+        "final_amount": round(final_amount, 2),
+    }
+
+
+def staff_names_from_workbook(upload):
+    try:
+        workbook = load_workbook(io.BytesIO(upload.read()), data_only=True, read_only=True)
+    except Exception as exc:
+        raise ValueError(f"Staff Excel read nahi hua: {exc}")
+    sheet = workbook.active
+    header_row = None
+    name_column = None
+    for row_number, row in enumerate(sheet.iter_rows(values_only=True), 1):
+        for column, value in enumerate(row, 1):
+            if normalized_header(value) in {"employeename", "staffname", "engineername", "name"}:
+                header_row, name_column = row_number, column
+                break
+        if header_row:
+            break
+    if not header_row:
+        raise ValueError("Excel me Employee Name heading nahi mili.")
+    names = []
+    for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
+        raw = row[name_column - 1] if name_column <= len(row) else ""
+        name = re.sub(r"\s+", " ", str(raw or "")).strip()
+        if not name:
+            continue
+        if normalized_header(name).startswith("total"):
+            break
+        if normalized_header(name) in {"sbi", "sbicc"}:
+            continue
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def staff_payments_workbook(month, entries):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Conveyance MIS"
+    headers = [
+        "Month", "Name", "Category", "Payment Basis", "Visits", "Visit Rate",
+        "Salary / Base", "KM", "Petrol Rate", "Conveyance", "Adjustment",
+        "Advance", "Final Payable", "Status", "Notes",
+    ]
+    sheet.append([f"SVAI Staff Payment & Conveyance MIS - {month}"])
+    sheet.append(headers)
+    for entry in entries:
+        profile = entry.profile
+        sheet.append([
+            month, profile.name, profile.category, profile.payment_mode,
+            entry.visits, profile.visit_rate, entry.base_amount, entry.km,
+            profile.petrol_rate, entry.conveyance_amount, entry.adjustment_amount,
+            entry.advance_amount, entry.final_amount, entry.status, entry.notes or "",
+        ])
+    total_row = sheet.max_row + 1
+    sheet.cell(total_row, 1).value = "MONTH TOTAL"
+    for column in (7, 10, 11, 12, 13):
+        letter = get_column_letter(column)
+        sheet.cell(total_row, column).value = f"=SUM({letter}3:{letter}{total_row - 1})"
+    sheet.merge_cells("A1:O1")
+    sheet["A1"].font = Font(bold=True, size=16, color="FFFFFF")
+    sheet["A1"].fill = PatternFill("solid", fgColor="163A63")
+    for cell in sheet[2]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F6FA8")
+    for cell in sheet[total_row]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="DDEBF7")
+    widths = [12, 24, 14, 16, 10, 12, 15, 10, 12, 15, 12, 12, 15, 12, 28]
+    for index, width in enumerate(widths, 1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    for row in sheet.iter_rows(min_row=3, max_row=total_row, min_col=6, max_col=13):
+        for cell in row:
+            cell.number_format = '₹#,##0.00'
+    sheet.freeze_panes = "A3"
+    sheet.auto_filter.ref = f"A2:O{max(2, total_row - 1)}"
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
 
 
 def billing_case_rows(cases):
@@ -1040,26 +1205,15 @@ def apply_followup_to_existing_case(
         if value and not (getattr(target, field, "") or "").strip():
             setattr(target, field, str(value).strip())
     stored = safe_json(target.extracted_json)
-    if received and (
-        not target.email_received_at or received > target.email_received_at
-    ):
-        stored.setdefault(
-            "initial_email_received_at",
-            target.email_received_at.isoformat() if target.email_received_at else "",
-        )
-        target.email_received_at = received
     stored.setdefault("followup_emails", []).append({
         "message_id": unique_id,
         "subject": subject,
         "received_at": received.isoformat() if received else "",
         "action": action,
     })
-    if details.get("correction_mail") or details.get("correction_request_mail"):
-        target.status = "Correction Pending"
-    elif details.get("system_pending_mail"):
-        target.status = "System Pending - Action Required"
-    elif mark_for_review:
-        target.status = "Existing Case - New Mail Review"
+    # A reminder/review/correction message belongs to the case audit trail, not
+    # the billing MIS chronology. Preserve the original assignment date/status
+    # so an old case does not reappear as today's work or inflate invoice rows.
     target.extracted_json = json.dumps(stored, ensure_ascii=False)
     db.session.commit()
     store_email_attachments(target, attachments)
@@ -3309,6 +3463,162 @@ def delete_template(asset_id):
     return redirect(url_for("templates_page"))
 
 
+@app.route("/conveyance")
+@login_required
+def conveyance_page():
+    try:
+        month = normalized_payment_month(request.args.get("month"))
+    except ValueError:
+        month = datetime.now(APP_TIMEZONE).strftime("%Y-%m")
+    profiles = StaffPaymentProfile.query.order_by(
+        StaffPaymentProfile.active.desc(), StaffPaymentProfile.name
+    ).all()
+    entries = StaffMonthlyPayment.query.filter_by(month=month).join(
+        StaffPaymentProfile
+    ).order_by(StaffPaymentProfile.category, StaffPaymentProfile.name).all()
+    totals = {
+        "base": sum(item.base_amount for item in entries),
+        "conveyance": sum(item.conveyance_amount for item in entries),
+        "advance": sum(item.advance_amount for item in entries),
+        "adjustment": sum(item.adjustment_amount for item in entries),
+        "final": sum(item.final_amount for item in entries),
+    }
+    return render_template(
+        "conveyance.html", month=month, profiles=profiles, entries=entries, totals=totals
+    )
+
+
+@app.route("/conveyance/profiles/save", methods=["POST"])
+@login_required
+def save_staff_payment_profile():
+    profile_id = request.form.get("profile_id", "").strip()
+    name = re.sub(r"\s+", " ", request.form.get("name", "")).strip()
+    try:
+        if not name:
+            raise ValueError("Staff/office name zaroori hai.")
+        category = request.form.get("category", "Staff")
+        if category not in {"Staff", "Office"}:
+            raise ValueError("Category valid nahi hai.")
+        payment_mode = request.form.get("payment_mode", "Per Visit")
+        if payment_mode not in {"Salary", "Per Visit", "Fixed / Other"}:
+            raise ValueError("Payment basis valid nahi hai.")
+        profile = (
+            db.session.get(StaffPaymentProfile, int(profile_id))
+            if profile_id.isdigit() else None
+        )
+        duplicate = StaffPaymentProfile.query.filter(
+            db.func.lower(StaffPaymentProfile.name) == name.casefold()
+        ).first()
+        if duplicate and (not profile or duplicate.id != profile.id):
+            profile = duplicate
+        profile = profile or StaffPaymentProfile(name=name)
+        profile.name = name
+        profile.category = category
+        profile.payment_mode = payment_mode
+        profile.fixed_salary = nonnegative_number(
+            request.form.get("fixed_salary"), "Monthly salary/fixed amount"
+        )
+        profile.visit_rate = nonnegative_number(request.form.get("visit_rate"), "Visit rate")
+        profile.petrol_rate = nonnegative_number(request.form.get("petrol_rate"), "Petrol rate")
+        profile.active = request.form.get("active", "1") == "1"
+        db.session.add(profile)
+        db.session.commit()
+        flash(f"{profile.name} ki payment settings saved.", "success")
+    except (ValueError, TypeError) as exc:
+        db.session.rollback()
+        flash(str(exc), "error")
+    return redirect(url_for("conveyance_page", month=request.form.get("month", "")))
+
+
+@app.route("/conveyance/profiles/import", methods=["POST"])
+@login_required
+def import_staff_payment_profiles():
+    upload = request.files.get("staff_file")
+    try:
+        if not upload or not upload.filename or Path(upload.filename).suffix.lower() != ".xlsx":
+            raise ValueError("Employee names import ke liye .xlsx file upload karein.")
+        names = staff_names_from_workbook(upload)
+        added = 0
+        for name in names:
+            existing = StaffPaymentProfile.query.filter(
+                db.func.lower(StaffPaymentProfile.name) == name.casefold()
+            ).first()
+            if existing:
+                continue
+            is_office = normalized_header(name) == "office"
+            db.session.add(StaffPaymentProfile(
+                name=name,
+                category="Office" if is_office else "Staff",
+                payment_mode="Fixed / Other" if is_office else "Per Visit",
+            ))
+            added += 1
+        db.session.commit()
+        flash(f"{added} naye staff name imported; existing names duplicate nahi hue.", "success")
+    except (ValueError, TypeError) as exc:
+        db.session.rollback()
+        flash(str(exc), "error")
+    return redirect(url_for("conveyance_page", month=request.form.get("month", "")))
+
+
+@app.route("/conveyance/monthly/save", methods=["POST"])
+@login_required
+def save_staff_monthly_payment():
+    month = request.form.get("month", "")
+    try:
+        month = normalized_payment_month(month)
+        profile = db.session.get(
+            StaffPaymentProfile, int(request.form.get("profile_id", "0"))
+        )
+        if not profile or not profile.active:
+            raise ValueError("Active staff/office name select karein.")
+        amounts = staff_payment_amounts(
+            profile,
+            visits=request.form.get("visits"),
+            km=request.form.get("km"),
+            base_override=request.form.get("base_override"),
+            advance=request.form.get("advance_amount"),
+            adjustment=request.form.get("adjustment_amount"),
+        )
+        entry = StaffMonthlyPayment.query.filter_by(
+            profile_id=profile.id, month=month
+        ).first() or StaffMonthlyPayment(profile_id=profile.id, month=month)
+        for field, value in amounts.items():
+            setattr(entry, field, value)
+        entry.status = request.form.get("status", "Pending")
+        if entry.status not in {"Pending", "Paid"}:
+            raise ValueError("Payment status valid nahi hai.")
+        entry.notes = request.form.get("notes", "").strip()
+        db.session.add(entry)
+        db.session.commit()
+        flash(f"{profile.name} ka {month} final payable ₹{entry.final_amount:,.2f} saved.", "success")
+    except (ValueError, TypeError) as exc:
+        db.session.rollback()
+        flash(str(exc), "error")
+    return redirect(url_for("conveyance_page", month=month))
+
+
+@app.route("/conveyance/export")
+@login_required
+def export_staff_payments():
+    try:
+        month = normalized_payment_month(request.args.get("month"))
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("conveyance_page"))
+    entries = StaffMonthlyPayment.query.filter_by(month=month).join(
+        StaffPaymentProfile
+    ).order_by(StaffPaymentProfile.category, StaffPaymentProfile.name).all()
+    if not entries:
+        flash("Selected month me export ke liye koi payment row nahi hai.", "error")
+        return redirect(url_for("conveyance_page", month=month))
+    content = staff_payments_workbook(month, entries)
+    return send_file(
+        io.BytesIO(content), as_attachment=True,
+        download_name=f"SVAI_Conveyance_MIS_{month}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.route("/billing", methods=["GET", "POST"])
 @login_required
 def billing_page():
@@ -3856,24 +4166,22 @@ def change_password():
 
 def scheduled_email_fetch():
     with app.app_context():
-        month_start, today = current_month_range()
-        full_catchup = datetime.now(APP_TIMEZONE).minute == 0
+        # Automatic capture scans only today's incoming assignments. Older
+        # dates are intentionally recovered through the manual From/To fetch.
+        # A short minute job cannot monopolize the fetch lock with a month scan.
+        today = datetime.now(APP_TIMEZONE).date()
         for account in EmailAccount.query.filter_by(active=True).all():
             try:
-                # Every-minute runs scan today for a fast live MIS. At the top
-                # of every hour, scan the whole month as a catch-up so delayed
-                # indexing or service sleep cannot leave a valuation mail out.
-                start_date = month_start if full_catchup else today
                 # The minute scheduler is for reliable case capture, not heavy
                 # attachment processing. Full documents remain available to a
                 # user-triggered fetch/report flow when missing fields matter.
                 result = fetch_email_account(
-                    account, start_date, today, enrich_documents=False
+                    account, today, today, enrich_documents=False
                 )
                 app.logger.info(
                     "Scheduled MIS fetch completed for %s (%s to %s): %s new, %s updated",
                     account.email,
-                    start_date,
+                    today,
                     today,
                     result.get("created", 0),
                     result.get("updated", 0),

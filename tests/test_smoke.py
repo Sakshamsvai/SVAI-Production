@@ -39,7 +39,8 @@ from ai_service_openai import (  # noqa: E402
 )
 from report_service import fill_docx_template, fill_excel_template  # noqa: E402
 from server import (  # noqa: E402
-    BillingTemplate, EmailAccount, FileAsset, SiteEngineer, WhatsAppGroup, User, ValuationCase, app, apply_email_details,
+    BillingTemplate, EmailAccount, FileAsset, SiteEngineer, WhatsAppGroup, User, ValuationCase,
+    StaffPaymentProfile, StaffMonthlyPayment, app, apply_email_details,
     apply_followup_to_existing_case, db, encrypt_password, is_followup_email,
     existing_case_for_duplicate_assignment, normalized_application_number,
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
@@ -49,6 +50,7 @@ from server import (  # noqa: E402
     fetch_email_account, fetch_full_message, fetch_mis_message,
     enrich_missing_address_from_email_document, imap_safe_assignment_folders,
     archived_case_has_assignment_identity, recover_structured_archived_cases,
+    staff_payment_amounts, staff_names_from_workbook,
 )
 
 
@@ -235,13 +237,20 @@ class SvaiSmokeTests(unittest.TestCase):
         self.login()
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Auto fetch + refresh: every 1 minute", response.data)
-        self.assertIn(b"monthly catch-up: hourly", response.data)
+        self.assertIn(b"Auto fetch: today every 1 minute", response.data)
+        self.assertIn(b"select From/To and Fetch manually", response.data)
         self.assertIn(b"60000", response.data)
         self.assertIn(b"Generated Reports", response.data)
         self.assertNotIn(b"Property Documents", response.data)
         self.assertNotIn(b"K.M.</th>", response.data)
         self.assertNotIn(b">Bills</a>", response.data)
+
+    def test_scheduler_scans_only_today_automatically(self):
+        import inspect
+
+        source = inspect.getsource(__import__("server").scheduled_email_fetch)
+        self.assertIn("account, today, today", source)
+        self.assertNotIn("month_start", source)
 
     def test_billing_fills_existing_invoice_table_with_km_slab_amount(self):
         workbook = Workbook()
@@ -265,6 +274,76 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(filled["G6"].value, 1800)
         self.assertEqual(unmatched, [])
         self.assertEqual(billing_fee_for_km(None, [(0, 30, 1500)]), None)
+
+    def test_staff_payment_calculation_import_dedupe_and_monthly_export(self):
+        profile = StaffPaymentProfile(
+            name="Conveyance Test Engineer", payment_mode="Per Visit",
+            visit_rate=300, petrol_rate=3, fixed_salary=0,
+        )
+        amounts = staff_payment_amounts(
+            profile, visits=10, km=125, advance=500, adjustment=100
+        )
+        self.assertEqual(amounts["base_amount"], 3000)
+        self.assertEqual(amounts["conveyance_amount"], 375)
+        self.assertEqual(amounts["final_amount"], 2975)
+
+        source = Workbook()
+        sheet = source.active
+        sheet.append(["Employee name", "No. Of visit", "KM"])
+        sheet.append(["Ajit Test", 3, 100])
+        sheet.append(["Ajit Test", 3, 100])
+        sheet.append(["Office", 0, 0])
+        sheet.append(["Total", 6, 200])
+        stream = io.BytesIO()
+        source.save(stream)
+        stream.seek(0)
+        stream.filename = "staff.xlsx"
+        self.assertEqual(staff_names_from_workbook(stream), ["Ajit Test", "Office"])
+
+        self.login()
+        response = self.client.post("/conveyance/profiles/save", data={
+            "_csrf_token": self.csrf(), "month": "2026-07",
+            "name": "Conveyance Test Engineer", "category": "Staff",
+            "payment_mode": "Per Visit", "fixed_salary": "0",
+            "visit_rate": "300", "petrol_rate": "3", "active": "1",
+        })
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            saved = StaffPaymentProfile.query.filter_by(
+                name="Conveyance Test Engineer"
+            ).one()
+            profile_id = saved.id
+        response = self.client.post("/conveyance/monthly/save", data={
+            "_csrf_token": self.csrf(), "month": "2026-07",
+            "profile_id": str(profile_id), "visits": "10", "km": "125",
+            "base_override": "", "advance_amount": "500",
+            "adjustment_amount": "100", "status": "Pending", "notes": "test",
+        })
+        self.assertEqual(response.status_code, 302)
+        # Re-saving the same person/month updates one row instead of duplicating it.
+        response = self.client.post("/conveyance/monthly/save", data={
+            "_csrf_token": self.csrf(), "month": "2026-07",
+            "profile_id": str(profile_id), "visits": "11", "km": "125",
+            "base_override": "", "advance_amount": "500",
+            "adjustment_amount": "100", "status": "Paid", "notes": "updated",
+        })
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            rows = StaffMonthlyPayment.query.filter_by(
+                profile_id=profile_id, month="2026-07"
+            ).all()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].final_amount, 3275)
+            self.assertEqual(rows[0].status, "Paid")
+        export = self.client.get("/conveyance/export?month=2026-07")
+        self.assertEqual(export.status_code, 200)
+        exported = load_workbook(io.BytesIO(export.data), data_only=False)
+        self.assertEqual(exported["Conveyance MIS"]["B3"].value, "Conveyance Test Engineer")
+        self.assertEqual(exported["Conveyance MIS"]["M3"].value, 3275)
+        page = self.client.get("/conveyance?month=2026-07")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"Final Month Payable", page.data)
+        self.assertIn(b"Conveyance Test Engineer", page.data)
 
     def test_billing_page_generates_from_live_mis_and_saved_bank_format(self):
         workbook = Workbook()
@@ -962,6 +1041,24 @@ class SvaiSmokeTests(unittest.TestCase):
             "Parvati Puram Colony Vidisha",
         )
 
+    def test_yes_bank_request_details_is_one_clean_assignment(self):
+        subject = "Request ID: R260814/308 is Initiated and awaiting your action."
+        body = (
+            "Assignment to Vendor / Internal Employee\n"
+            "Your request for property valuation is assigned for further process.\n"
+            "Request Details : R260814/308\n"
+            "Customer Name : Mr.Vijay Kushwah\n"
+            "Property Address : Kasba Vidisha PHN 50 Teh and Dist Vidisha-464001\n"
+            "Contact Number : 9399282893"
+        )
+        extracted = regex_email_extract(
+            subject, body, "YESReap App support <yesreapappsupport@yes.bank.in>"
+        )
+        self.assertTrue(extracted["is_valuation"])
+        self.assertEqual(extracted["application_number"], "R260814/308")
+        self.assertEqual(extracted["customer_name"], "Vijay Kushwah")
+        self.assertEqual(extracted["bank_name"], "Yes Bank")
+
     def test_public_mail_sender_keeps_strong_new_assignment_only(self):
         self.assertTrue(deterministic_email_candidate(
             "Fresh Technical Valuation - Application No LAPGUN100030646",
@@ -1217,7 +1314,7 @@ class SvaiSmokeTests(unittest.TestCase):
                 case, {}, [], "Repeated fetch", None, "<followup@example.com>"
             ))
 
-    def test_later_same_application_mail_updates_mis_date_and_action_status(self):
+    def test_later_same_application_mail_preserves_clean_mis_date_and_status(self):
         with app.app_context():
             original = datetime(2026, 8, 11, 10, 0)
             latest = datetime(2026, 8, 12, 9, 30)
@@ -1246,10 +1343,9 @@ class SvaiSmokeTests(unittest.TestCase):
             )
 
             self.assertTrue(changed)
-            self.assertEqual(case.email_received_at, latest)
-            self.assertEqual(case.status, "System Pending - Action Required")
+            self.assertEqual(case.email_received_at, original)
+            self.assertEqual(case.status, "New - Email")
             stored = safe_json(case.extracted_json)
-            self.assertEqual(stored["initial_email_received_at"], original.isoformat())
             self.assertEqual(len(stored["followup_emails"]), 1)
 
     def test_real_bank_subject_patterns_and_signature_are_parsed_safely(self):

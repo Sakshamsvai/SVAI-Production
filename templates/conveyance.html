@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}SVAI Conveyance{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-head"><div><h1>Conveyance / Staff Payment</h1><p>Salary, per-visit payment, KM petrol, advance aur office items ka monthly payable ek jagah.</p></div></div>
+  <form method="get" class="form-grid three">
+    <label>Payment Month<input type="month" name="month" value="{{ month }}" required></label>
+    <div><button>View Month</button></div>
+    <div><a class="button green" href="{{ url_for('export_staff_payments', month=month) }}">Download Monthly MIS</a></div>
+  </form>
+</section>
+
+<section class="stats">
+  <div class="stat"><span>Base Salary / Visit Pay</span><b>₹{{ '%.2f'|format(totals.base) }}</b></div>
+  <div class="stat"><span>Petrol / Conveyance</span><b>₹{{ '%.2f'|format(totals.conveyance) }}</b></div>
+  <div class="stat"><span>Advance Deduction</span><b>₹{{ '%.2f'|format(totals.advance) }}</b></div>
+  <div class="stat"><span>Final Month Payable</span><b>₹{{ '%.2f'|format(totals.final) }}</b></div>
+</section>
+
+<section class="card">
+  <h2>1. Staff names import / add</h2>
+  <p>July wali file upload karne par sirf employee names import honge. Original Excel aur uske amounts change nahi honge.</p>
+  <form method="post" action="{{ url_for('import_staff_payment_profiles') }}" enctype="multipart/form-data" class="form-grid three">
+    <input type="hidden" name="month" value="{{ month }}">
+    <label>Staff Excel (.xlsx)<input type="file" name="staff_file" accept=".xlsx" required></label>
+    <div><button class="secondary">Import Employee Names</button></div>
+  </form>
+  <hr>
+  <form method="post" action="{{ url_for('save_staff_payment_profile') }}" class="form-grid three">
+    <input type="hidden" name="month" value="{{ month }}"><input type="hidden" name="profile_id" value="">
+    <label>Name<input name="name" required></label>
+    <label>Category<select name="category"><option>Staff</option><option>Office</option></select></label>
+    <label>Payment Basis<select name="payment_mode"><option>Per Visit</option><option>Salary</option><option>Fixed / Other</option></select></label>
+    <label>Monthly Salary / Fixed ₹<input type="number" step="0.01" min="0" name="fixed_salary" value="0"></label>
+    <label>Per Visit Rate ₹<input type="number" step="0.01" min="0" name="visit_rate" value="0"></label>
+    <label>Petrol Rate ₹ / KM<input type="number" step="0.01" min="0" name="petrol_rate" value="0"></label>
+    <input type="hidden" name="active" value="1">
+    <div class="full"><button>Save New Profile</button></div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Saved Staff Rates</h2>
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Category</th><th>Basis</th><th>Salary / Fixed</th><th>Visit Rate</th><th>Petrol / KM</th><th>Active</th><th></th></tr></thead><tbody>
+  {% for profile in profiles %}<tr>
+    <td><input form="profile-{{ profile.id }}" name="name" value="{{ profile.name }}" required></td>
+    <td><select form="profile-{{ profile.id }}" name="category"><option {% if profile.category == 'Staff' %}selected{% endif %}>Staff</option><option {% if profile.category == 'Office' %}selected{% endif %}>Office</option></select></td>
+    <td><select form="profile-{{ profile.id }}" name="payment_mode"><option {% if profile.payment_mode == 'Per Visit' %}selected{% endif %}>Per Visit</option><option {% if profile.payment_mode == 'Salary' %}selected{% endif %}>Salary</option><option {% if profile.payment_mode == 'Fixed / Other' %}selected{% endif %}>Fixed / Other</option></select></td>
+    <td><input form="profile-{{ profile.id }}" type="number" step="0.01" min="0" name="fixed_salary" value="{{ profile.fixed_salary }}"></td>
+    <td><input form="profile-{{ profile.id }}" type="number" step="0.01" min="0" name="visit_rate" value="{{ profile.visit_rate }}"></td>
+    <td><input form="profile-{{ profile.id }}" type="number" step="0.01" min="0" name="petrol_rate" value="{{ profile.petrol_rate }}"></td>
+    <td><select form="profile-{{ profile.id }}" name="active"><option value="1" {% if profile.active %}selected{% endif %}>Yes</option><option value="0" {% if not profile.active %}selected{% endif %}>No</option></select></td>
+    <td><form id="profile-{{ profile.id }}" method="post" action="{{ url_for('save_staff_payment_profile') }}"><input type="hidden" name="month" value="{{ month }}"><input type="hidden" name="profile_id" value="{{ profile.id }}"><button class="small">Update</button></form></td>
+  </tr>{% else %}<tr><td colspan="8" class="empty">Pehle Excel se names import karein ya profile add karein.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+
+<section class="card">
+  <h2>2. {{ month }} Monthly Calculation</h2>
+  <form method="post" action="{{ url_for('save_staff_monthly_payment') }}" class="form-grid three" id="payment-form">
+    <input type="hidden" name="month" value="{{ month }}">
+    <label>Name<select name="profile_id" id="staff-profile" required><option value="">Select staff / office</option>{% for profile in profiles if profile.active %}<option value="{{ profile.id }}" data-mode="{{ profile.payment_mode }}" data-salary="{{ profile.fixed_salary }}" data-visit-rate="{{ profile.visit_rate }}" data-petrol-rate="{{ profile.petrol_rate }}">{{ profile.name }} — {{ profile.payment_mode }}</option>{% endfor %}</select></label>
+    <label>Visits<input type="number" min="0" step="1" name="visits" value="0"></label>
+    <label>Total KM<input type="number" min="0" step="0.01" name="km" value="0"></label>
+    <label>Base override ₹ <small>(blank = saved rate)</small><input type="number" min="0" step="0.01" name="base_override"></label>
+    <label>Advance deduction ₹<input type="number" min="0" step="0.01" name="advance_amount" value="0"></label>
+    <label>Adjustment ₹ <small>(minus allowed)</small><input type="number" step="0.01" name="adjustment_amount" value="0"></label>
+    <label>Status<select name="status"><option>Pending</option><option>Paid</option></select></label>
+    <label class="full">Notes<input name="notes" placeholder="Advance/payment note"></label>
+    <div class="result-grid full" id="live-result"><div><span>Base Pay</span><b id="base-preview">₹0.00</b></div><div><span>Petrol</span><b id="petrol-preview">₹0.00</b></div><div><span>Final Payable</span><b id="final-preview">₹0.00</b></div></div>
+    <div class="full"><button class="green">Calculate & Save Monthly Row</button></div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>{{ month }} Payment MIS</h2>
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Basis</th><th>Visits</th><th>Base</th><th>KM</th><th>₹/KM</th><th>Petrol</th><th>Adjustment</th><th>Advance</th><th>Final</th><th>Status</th><th>Notes</th></tr></thead><tbody>
+  {% for item in entries %}<tr><td><b>{{ item.profile.name }}</b><small>{{ item.profile.category }}</small></td><td>{{ item.profile.payment_mode }}</td><td>{{ item.visits }}</td><td>₹{{ '%.2f'|format(item.base_amount) }}</td><td>{{ item.km }}</td><td>₹{{ item.profile.petrol_rate }}</td><td>₹{{ '%.2f'|format(item.conveyance_amount) }}</td><td>₹{{ '%.2f'|format(item.adjustment_amount) }}</td><td>₹{{ '%.2f'|format(item.advance_amount) }}</td><td><b>₹{{ '%.2f'|format(item.final_amount) }}</b></td><td><span class="pill">{{ item.status }}</span></td><td>{{ item.notes or '—' }}</td></tr>
+  {% else %}<tr><td colspan="12" class="empty">Is month ki payment rows abhi save nahi hui.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+
+<script>
+const paymentForm = document.getElementById('payment-form');
+const profileSelect = document.getElementById('staff-profile');
+const money = value => '₹' + (Number(value) || 0).toFixed(2);
+function calculatePayment() {
+  const option = profileSelect.options[profileSelect.selectedIndex];
+  const mode = option?.dataset.mode || '';
+  const visits = Number(paymentForm.visits.value) || 0;
+  const km = Number(paymentForm.km.value) || 0;
+  const override = paymentForm.base_override.value;
+  let base = override !== '' ? Number(override) : mode === 'Salary' ? Number(option?.dataset.salary || 0) : mode === 'Per Visit' ? visits * Number(option?.dataset.visitRate || 0) : Number(option?.dataset.salary || 0);
+  const petrol = km * Number(option?.dataset.petrolRate || 0);
+  const finalAmount = base + petrol + (Number(paymentForm.adjustment_amount.value) || 0) - (Number(paymentForm.advance_amount.value) || 0);
+  document.getElementById('base-preview').textContent = money(base);
+  document.getElementById('petrol-preview').textContent = money(petrol);
+  document.getElementById('final-preview').textContent = money(finalAmount);
+}
+paymentForm.addEventListener('input', calculatePayment); calculatePayment();
+</script>
+{% endblock %}

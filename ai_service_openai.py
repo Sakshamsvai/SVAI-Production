@@ -53,6 +53,7 @@ GENERIC_IDENTIFIER_WORDS = {
 }
 
 BANK_DOMAIN_NAMES = {
+    "yes.bank": "Yes Bank",
     "bajajhousing": "Bajaj Housing Finance",
     "bajajfinserv": "Bajaj Housing Finance",
     "ummeedhfc": "Ummeed Housing Finance",
@@ -402,6 +403,7 @@ def deterministic_email_candidate(subject, body, sender=""):
     case_hits = sum(term in text for term in CASE_TERMS)
     identifiers = bool(re.search(
         r"(?i)\b(?:(?:application|app|case|proposal|loan)\s*(?:no|number|id|#)|"
+        r"request\s*(?:(?:no|number|id|#)|details)|"
         r"lead\s*(?:id)?\s*(?:no|number|#)?)"
         r"\s*[:=\-]?\s*[A-Z0-9][A-Z0-9/\-]{4,}",
         f"{subject}\n{body}",
@@ -696,6 +698,8 @@ def regex_email_extract(subject, body, sender):
     result = _subject_fields(subject)
 
     application_number = _first_match([
+        r"(?im)(?:request\s+(?:id|details)|request\s*(?:no|number|#))"
+        r"\s*[:=\-]?\s*([A-Z0-9][A-Z0-9/\-]{4,45})",
         r"(?im)(?:(?:application|app|case|proposal|loan|deal)\s*"
         r"(?:no|number|id|#)|lead\s*(?:id)?\s*(?:no|number|#)?)"
         r"\s*[:=\-]?\s*([A-Z0-9][A-Z0-9/\-]{4,45})",
