@@ -4052,9 +4052,9 @@ def generate_report(case_id):
         filename_key = Path(asset.filename).stem.casefold()
         category = None
         if any(token in filename_key for token in ("google", "location", "map")):
-            category = "Location Map"
+            category = "Google Map"
         elif any(token in filename_key for token in ("kisan", "khasra", "bhulekh", "bhu")):
-            category = "Site Sketch"
+            category = "MP Kisan"
         if category:
             photo_assets.append({
                 "filename": asset.filename,

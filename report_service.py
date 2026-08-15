@@ -533,10 +533,38 @@ def fill_known_excel_cells(workbook, profile, layout_key):
         ws[coordinate] = formula
 
 
+NUMBERED_PROPERTY_PHOTO_CATEGORIES = {
+    1: "Front Side View",
+    2: "Front Elevation",
+    3: "Distant Property View",
+    4: "Front Side View",
+    5: "Internal Room",
+    6: "Internal Room",
+    7: "Internal Room",
+    8: "Kitchen",
+    9: "Other Site Photo",
+    10: "Electricity Meter",
+}
+
+
+def _effective_photo_category(asset):
+    category = asset.get("category") or "Other Site Photo"
+    filename = Path(asset.get("filename") or "").stem.casefold()
+    if any(token in filename for token in ("google_map", "google map")):
+        return "Google Map"
+    if any(token in filename for token in ("mp_kisan", "mp kishan", "mp_kishan")):
+        return "MP Kisan"
+    if category == "Other Site Photo":
+        match = re.search(r"property[_ -]*photos?[_ -]*(\d+)$", filename)
+        if match:
+            return NUMBERED_PROPERTY_PHOTO_CATEGORIES.get(int(match.group(1)), category)
+    return category
+
+
 def _photo_groups(photo_assets):
     groups = defaultdict(list)
     for asset in photo_assets or []:
-        groups[asset.get("category") or "Other Site Photo"].append(asset)
+        groups[_effective_photo_category(asset)].append(asset)
     return groups
 
 
@@ -570,7 +598,7 @@ def _excel_image(asset, max_width, max_height):
     stream = io.BytesIO(asset["content"])
     with PillowImage.open(stream) as image:
         image = ImageOps.exif_transpose(image)
-        category = asset.get("category") or ""
+        category = _effective_photo_category(asset)
         protected = category in {"Property Document", "Site Sketch", "Location Map", "MP Kisan"}
         if protected:
             width, height = image.size
