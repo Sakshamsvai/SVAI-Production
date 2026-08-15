@@ -3826,6 +3826,112 @@ def delete_billing_template(template_id):
     return redirect(url_for("billing_page"))
 
 
+def resolve_case_report_template(case, template_id=""):
+    template = None
+    if str(template_id).isdigit():
+        template = FileAsset.query.options(defer(FileAsset.content)).filter(
+            FileAsset.id == int(template_id),
+            db.or_(
+                FileAsset.asset_type == "template",
+                db.and_(FileAsset.asset_type == "case_template", FileAsset.case_id == case.id),
+            ),
+        ).first()
+    if template is None:
+        template = FileAsset.query.options(defer(FileAsset.content)).filter_by(
+            case_id=case.id, asset_type="case_template"
+        ).order_by(FileAsset.created_at.desc()).first()
+    if template is None:
+        template = matching_master_template(case.bank_name)
+    return template
+
+
+@app.route("/cases/<int:case_id>/local-report-data")
+@login_required
+def local_report_data(case_id):
+    case = ValuationCase.query.get_or_404(case_id)
+    valuation = Valuation.query.filter_by(case_id=case_id).first()
+    stored = safe_json(case.extracted_json)
+    profile = dict(stored.get("case_profile") or stored.get("email") or stored)
+    profile.update({
+        "application_number": case.application_number,
+        "customer_name": case.customer_name,
+        "contact_number": case.contact_number,
+        "property_address": case.property_address,
+        "bank_name": case.bank_name,
+        "branch_name": case.branch_name,
+        "case_type": case.case_type,
+        "visit_by": case.visit_by,
+        "report_date": datetime.now(APP_TIMEZONE).strftime("%d-%m-%Y"),
+        **valuation_as_dict(valuation),
+    })
+    assets = FileAsset.query.options(defer(FileAsset.content)).filter(
+        FileAsset.case_id == case_id,
+        FileAsset.asset_type.in_(("document", "visit_data", "photo")),
+    ).order_by(FileAsset.id).all()
+    template = resolve_case_report_template(case, request.args.get("template_id", ""))
+    if template is None:
+        return jsonify({"error": "Bank report format missing."}), 400
+    extension = Path(template.filename).suffix.lower()
+    if extension not in TEMPLATE_EXTENSIONS:
+        return jsonify({"error": "Unsupported bank report format."}), 400
+    report_name = secure_filename(
+        f"SVAI_DRAFT_{case.application_number or case.id}_"
+        f"{case.customer_name or 'Pending_Name'}{extension}"
+    )
+    return jsonify({
+        "profile": profile,
+        "report_name": report_name,
+        "template": {
+            "url": url_for("download_asset", asset_id=template.id),
+            "filename": template.filename,
+        },
+        "assets": [{
+            "url": url_for("download_asset", asset_id=asset.id),
+            "filename": asset.filename,
+            "asset_type": asset.asset_type,
+            "category": asset.category or "",
+        } for asset in assets],
+    })
+
+
+@app.route("/cases/<int:case_id>/local-report-save", methods=["POST"])
+@login_required
+def save_local_report(case_id):
+    case = ValuationCase.query.get_or_404(case_id)
+    item = request.files.get("report")
+    if not item or not item.filename:
+        return jsonify({"error": "Generated report missing."}), 400
+    filename = secure_filename(item.filename)
+    extension = Path(filename).suffix.lower()
+    if extension not in TEMPLATE_EXTENSIONS:
+        return jsonify({"error": "Generated report type is not supported."}), 400
+    content = item.read()
+    mime_type = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if extension == ".docx" else
+        "application/vnd.ms-excel.sheet.macroEnabled.12"
+        if extension == ".xlsm" else
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    report = FileAsset(
+        case_id=case.id, asset_type="report", category=case.bank_name,
+        filename=filename, mime_type=mime_type, content=content,
+    )
+    db.session.add(report)
+    for asset in FileAsset.query.filter(
+        FileAsset.case_id == case.id,
+        FileAsset.asset_type.in_(("document", "photo", "visit_data", "case_template")),
+    ).all():
+        db.session.delete(asset)
+    case.status = "Draft Report Generated"
+    db.session.commit()
+    return jsonify({
+        "status": "ok",
+        "report_id": report.id,
+        "download_url": url_for("download_asset", asset_id=report.id),
+    })
+
+
 @app.route("/cases/<int:case_id>/report", methods=["POST"])
 @login_required
 def generate_report(case_id):

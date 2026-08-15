@@ -1,0 +1,130 @@
+import io
+import json
+import os
+from pathlib import Path
+
+from flask import Flask, jsonify, request, send_file
+from pypdf import PdfReader
+
+from report_service import fill_docx_template, fill_excel_template
+
+
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
+
+
+@app.before_request
+def restrict_browser_origin():
+    origin = request.headers.get("Origin", "")
+    allowed = (
+        not origin
+        or origin == "https://svai-valuation-app.onrender.com"
+        or origin.startswith("http://127.0.0.1")
+    )
+    if not allowed:
+        return jsonify({"error": "Origin not allowed."}), 403
+
+
+@app.after_request
+def allow_svai_browser(response):
+    origin = request.headers.get("Origin", "")
+    if origin == "https://svai-valuation-app.onrender.com" or origin.startswith("http://127.0.0.1"):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    response.headers["Access-Control-Expose-Headers"] = "Content-Disposition"
+    return response
+
+
+@app.route("/health", methods=["GET", "OPTIONS"])
+def health():
+    return jsonify({"status": "ok", "mode": "SVAI Local Report Worker"})
+
+
+def pdf_photos(filename, content, asset_type):
+    if Path(filename).suffix.lower() != ".pdf":
+        return []
+    name = Path(filename).stem.casefold()
+    property_document = any(token in name for token in (
+        "property_paper", "property paper", "registry", "sale_deed", "sale deed",
+    ))
+    visit_source = asset_type == "visit_data" or any(
+        token in name for token in ("visit", "inspection", "site_data", "site data")
+    )
+    if not (property_document or visit_source):
+        return []
+    output = []
+    reader = PdfReader(io.BytesIO(content))
+    for page_index, page in enumerate(reader.pages):
+        images = list(page.images)
+        if not images:
+            continue
+        largest = max(images, key=lambda item: len(item.data or b""))
+        if len(largest.data or b"") < 10_000:
+            continue
+        category = "Property Document" if property_document else (
+            "Front Elevation" if page_index == 0 else "Other Site Photo"
+        )
+        output.append({
+            "filename": f"{Path(filename).stem}_page_{page_index + 1}_{largest.name}",
+            "category": category,
+            "content": largest.data,
+        })
+    return output
+
+
+@app.route("/generate", methods=["POST", "OPTIONS"])
+def generate():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    profile = json.loads(request.form.get("profile", "{}"))
+    manifest = json.loads(request.form.get("manifest", "[]"))
+    template = request.files.get("template")
+    if not template or not template.filename:
+        return jsonify({"error": "Bank template missing."}), 400
+    template_content = template.read()
+    photos = []
+    for item in manifest:
+        upload = request.files.get(item["field"])
+        if not upload:
+            continue
+        content = upload.read()
+        asset_type = item.get("asset_type", "")
+        extension = Path(item.get("filename", "")).suffix.lower()
+        if asset_type == "photo" or extension in {".jpg", ".jpeg", ".png", ".webp"}:
+            photos.append({
+                "filename": item.get("filename") or upload.filename,
+                "category": item.get("category") or "Other Site Photo",
+                "content": content,
+            })
+        elif extension == ".pdf":
+            photos.extend(pdf_photos(item.get("filename") or upload.filename, content, asset_type))
+    extension = Path(template.filename).suffix.lower()
+    if extension == ".docx":
+        output = fill_docx_template(
+            template_content, profile, photos,
+            template_name=template.filename,
+            bank_name=profile.get("bank_name", ""),
+        )
+        mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    else:
+        output = fill_excel_template(
+            template_content, profile, photos,
+            template_name=template.filename,
+            bank_name=profile.get("bank_name", ""),
+        )
+        if extension == ".xlsm":
+            mime = "application/vnd.ms-excel.sheet.macroEnabled.12"
+        else:
+            extension = ".xlsx"
+            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    filename = request.form.get("report_name") or f"SVAI_Local_Report{extension}"
+    return send_file(
+        io.BytesIO(output), as_attachment=True, download_name=filename, mimetype=mime
+    )
+
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=int(os.getenv("SVAI_LOCAL_WORKER_PORT", "8765")), threaded=False)

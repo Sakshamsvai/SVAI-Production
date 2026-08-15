@@ -38,6 +38,7 @@ from ai_service_openai import (  # noqa: E402
     regex_email_extract,
 )
 from report_service import fill_docx_template, fill_excel_template  # noqa: E402
+from local_report_worker import app as local_worker_app  # noqa: E402
 from server import (  # noqa: E402
     BillingTemplate, EmailAccount, FileAsset, SiteEngineer, WhatsAppGroup, User, ValuationCase,
     StaffPaymentProfile, StaffMonthlyPayment, app, apply_email_details,
@@ -94,6 +95,36 @@ class SvaiSmokeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "keep each file under 12 MB"):
             read_upload_limited(Upload())
+
+    def test_local_worker_generates_exact_excel_template_without_cloud_worker(self):
+        template = (
+            Path(__file__).resolve().parents[1] / "seed_templates" / "SBFC.xlsx"
+        ).read_bytes()
+        client = local_worker_app.test_client()
+        response = client.post(
+            "/generate",
+            data={
+                "profile": json.dumps({
+                    "application_number": "LOCAL-WORKER-001",
+                    "customer_name": "Local Worker Customer",
+                    "bank_name": "SBFC",
+                }),
+                "manifest": "[]",
+                "report_name": "SVAI_LOCAL_WORKER_TEST.xlsx",
+                "template": (io.BytesIO(template), "SBFC.xlsx"),
+            },
+            content_type="multipart/form-data",
+            headers={"Origin": "https://svai-valuation-app.onrender.com"},
+        )
+        self.assertEqual(response.status_code, 200)
+        workbook = load_workbook(io.BytesIO(response.data), data_only=False)
+        self.assertTrue(workbook.sheetnames)
+
+    def test_local_worker_rejects_untrusted_web_origin(self):
+        response = local_worker_app.test_client().get(
+            "/health", headers={"Origin": "https://untrusted.example"}
+        )
+        self.assertEqual(response.status_code, 403)
 
     def test_manual_upload_does_not_load_local_ocr_model(self):
         self.login()

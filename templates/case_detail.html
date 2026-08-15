@@ -232,8 +232,74 @@
       {% endfor %}
     </select>
     <button class="green" {% if case.status == "Portal Pending" %}disabled{% endif %}>Generate & Download Draft</button>
+    <button type="button" class="green" id="local-report-button" {% if case.status == "Portal Pending" %}disabled{% endif %}>Generate on This PC</button>
   </form>
+  <p class="note">Laptop RAM use karne ke liye pehle <code>START_REPORT_WORKER.ps1</code> chalu rakhein. Files one-by-one laptop par aayengi; heavy report work Render par nahi chalega.</p>
+  <p id="local-report-status" class="note"></p>
   <a href="{{ url_for('templates_page') }}">Manage global bank formats</a>
 </section>
+<script>
+document.getElementById("local-report-button")?.addEventListener("click", async function () {
+  const button = this;
+  const status = document.getElementById("local-report-status");
+  const workerBase = "http://127.0.0.1:8765";
+  button.disabled = true;
+  try {
+    status.textContent = "Local worker check ho raha hai...";
+    const health = await fetch(workerBase + "/health");
+    if (!health.ok) throw new Error("Local Report Worker response nahi de raha.");
+    const templateId = document.querySelector('select[name="template_id"]')?.value || "";
+    const infoResponse = await fetch(
+      {{ url_for('local_report_data', case_id=case.id) | tojson }} +
+      "?template_id=" + encodeURIComponent(templateId)
+    );
+    const info = await infoResponse.json();
+    if (!infoResponse.ok) throw new Error(info.error || "Case report data nahi mila.");
+    const form = new FormData();
+    form.append("profile", JSON.stringify(info.profile));
+    form.append("report_name", info.report_name);
+    status.textContent = "Bank template laptop par aa raha hai...";
+    const templateBlob = await (await fetch(info.template.url)).blob();
+    form.append("template", templateBlob, info.template.filename);
+    const manifest = [];
+    for (let index = 0; index < info.assets.length; index++) {
+      const asset = info.assets[index];
+      status.textContent = `File ${index + 1}/${info.assets.length} laptop par aa rahi hai...`;
+      const blob = await (await fetch(asset.url)).blob();
+      const field = `asset_${index}`;
+      form.append(field, blob, asset.filename);
+      manifest.push({...asset, field});
+    }
+    form.append("manifest", JSON.stringify(manifest));
+    status.textContent = "Report is PC ki RAM se ban rahi hai...";
+    const generated = await fetch(workerBase + "/generate", {method: "POST", body: form});
+    if (!generated.ok) {
+      let message = "Local report generate nahi hui.";
+      try { message = (await generated.json()).error || message; } catch (_) {}
+      throw new Error(message);
+    }
+    const reportBlob = await generated.blob();
+    status.textContent = "Final report live case me save ho rahi hai...";
+    const saveForm = new FormData();
+    saveForm.append("report", reportBlob, info.report_name);
+    const saved = await fetch(
+      {{ url_for('save_local_report', case_id=case.id) | tojson }},
+      {method: "POST", headers: {"X-CSRF-Token": csrfToken}, body: saveForm}
+    );
+    const savedInfo = await saved.json();
+    if (!saved.ok) throw new Error(savedInfo.error || "Final report live case me save nahi hui.");
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(reportBlob);
+    link.download = info.report_name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 30000);
+    status.textContent = "Report laptop par bani, live case me save hui aur download ho gayi.";
+  } catch (error) {
+    status.textContent = error.message + " START_REPORT_WORKER.ps1 chalu karke phir try karein.";
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
 {% endif %}
 {% endblock %}
