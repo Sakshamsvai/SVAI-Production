@@ -279,7 +279,12 @@ document.getElementById("local-report-button")?.addEventListener("click", async 
       throw new Error(message);
     }
     const reportBlob = await generated.blob();
-    status.textContent = "Final report live case me save ho rahi hai...";
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(reportBlob);
+    link.download = info.report_name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 30000);
+    status.textContent = "Report laptop ke Downloads me save ho gayi. Live case copy save ho rahi hai...";
     const saveForm = new FormData();
     saveForm.append("report", reportBlob, info.report_name);
     const saved = await fetch(
@@ -287,12 +292,10 @@ document.getElementById("local-report-button")?.addEventListener("click", async 
       {method: "POST", headers: {"X-CSRF-Token": csrfToken}, body: saveForm}
     );
     const savedInfo = await saved.json();
-    if (!saved.ok) throw new Error(savedInfo.error || "Final report live case me save nahi hui.");
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(reportBlob);
-    link.download = info.report_name;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 30000);
+    if (!saved.ok) {
+      status.textContent = "Report Downloads me surakshit hai; live case copy save nahi ho saki.";
+      return;
+    }
     status.textContent = "Report laptop par bani, live case me save hui aur download ho gayi.";
   } catch (error) {
     status.textContent = error.message + " START_REPORT_WORKER.ps1 chalu karke phir try karein.";
