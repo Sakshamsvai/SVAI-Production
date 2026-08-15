@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --workers 1 --threads 4 --timeout 180 --bind 0.0.0.0:$PORT server:app
+    startCommand: gunicorn --workers 1 --threads 2 --timeout 180 --max-requests 250 --max-requests-jitter 25 --bind 0.0.0.0:$PORT server:app
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
@@ -27,5 +27,7 @@ services:
         value: "true"
       - key: EMAIL_FETCH_MINUTES
         value: "1"
+      - key: MALLOC_ARENA_MAX
+        value: "2"
       - key: SESSION_COOKIE_SECURE
         value: "true"

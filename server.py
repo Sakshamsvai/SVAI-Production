@@ -1,4 +1,5 @@
 import base64
+import gc
 import io
 import json
 import os
@@ -4259,6 +4260,17 @@ def scheduled_email_fetch():
                 )
             except Exception as exc:
                 app.logger.warning("Scheduled email fetch failed for %s: %s", account.email, exc)
+            finally:
+                # Repeated MIME/IMAP parsing can leave large temporary arenas
+                # resident in a 512 MB Render worker. Release ORM references and
+                # collect between mailboxes so the web UI remains responsive.
+                db.session.remove()
+                gc.collect()
+                try:
+                    import ctypes
+                    ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except (OSError, AttributeError):
+                    pass
 
 
 def start_scheduler():
