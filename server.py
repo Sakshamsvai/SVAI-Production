@@ -7,7 +7,6 @@ import re
 import secrets
 import imaplib
 import smtplib
-import tempfile
 import time
 import threading
 import email as email_lib
@@ -33,7 +32,6 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pypdf import PdfReader
-from sqlalchemy import inspect, text
 from sqlalchemy.orm import defer
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
@@ -356,93 +354,6 @@ def login_required(fn):
             return redirect(url_for("login"))
         return fn(*args, **kwargs)
     return wrapped
-
-
-def _backup_json_value(value):
-    """Encode database values losslessly for a portable private backup."""
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, bytes):
-        return {"$type": "bytes", "base64": base64.b64encode(value).decode("ascii")}
-    if isinstance(value, (datetime, date)):
-        return {"$type": type(value).__name__, "value": value.isoformat()}
-    return {"$type": "string", "value": str(value)}
-
-
-@app.route("/admin/portable-database-backup")
-def portable_database_backup():
-    """Download a private, host-neutral backup without exposing DB credentials."""
-    user = db.session.get(User, session.get("user_id"))
-    recovery_code = os.getenv("ADMIN_RECOVERY_CODE", "")
-    supplied_code = request.headers.get("X-SVAI-Recovery-Code", "")
-    recovery_allowed = bool(recovery_code) and secrets.compare_digest(
-        supplied_code, recovery_code
-    )
-    if (not user or user.role != "admin") and not recovery_allowed:
-        abort(403)
-
-    stamp = datetime.now(APP_TIMEZONE).strftime("%Y%m%d-%H%M%S")
-    handle, temp_name = tempfile.mkstemp(prefix="svai-private-backup-", suffix=".zip")
-    os.close(handle)
-    manifest = {
-        "format": "SVAI portable database backup v1",
-        "created_at": datetime.now(APP_TIMEZONE).isoformat(),
-        "tables": [],
-    }
-    try:
-        schema = inspect(db.engine)
-        preparer = db.engine.dialect.identifier_preparer
-        with zipfile.ZipFile(temp_name, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
-            with db.engine.connect() as connection:
-                transaction = connection.begin()
-                try:
-                    if db.engine.dialect.name == "postgresql":
-                        connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-                    for table_name in sorted(schema.get_table_names()):
-                        columns = schema.get_columns(table_name)
-                        quoted_table = preparer.quote(table_name)
-                        result = connection.execution_options(stream_results=True).execute(
-                            text(f"SELECT * FROM {quoted_table}")
-                        ).mappings()
-                        count = 0
-                        with bundle.open(f"tables/{table_name}.jsonl", "w") as output:
-                            while True:
-                                rows = result.fetchmany(50)
-                                if not rows:
-                                    break
-                                for row in rows:
-                                    payload = {key: _backup_json_value(value) for key, value in row.items()}
-                                    line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
-                                    output.write(line.encode("utf-8"))
-                                    count += 1
-                        manifest["tables"].append({
-                            "name": table_name,
-                            "row_count": count,
-                            "columns": [
-                                {"name": column["name"], "type": str(column["type"]), "nullable": column["nullable"]}
-                                for column in columns
-                            ],
-                        })
-                finally:
-                    transaction.rollback()
-            bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-            bundle.writestr(
-                "RESTORE_README.txt",
-                "PRIVATE SVAI PRODUCTION DATA. Do not upload to GitHub or share publicly.\n"
-                "Create the schema from the matching SVAI source commit, then restore the JSONL tables.\n",
-            )
-        response = send_file(
-            temp_name,
-            as_attachment=True,
-            download_name=f"svai-private-production-backup-{stamp}.zip",
-            mimetype="application/zip",
-        )
-        response.call_on_close(lambda: os.path.exists(temp_name) and os.remove(temp_name))
-        return response
-    except Exception:
-        if os.path.exists(temp_name):
-            os.remove(temp_name)
-        raise
 
 
 def api_login_required(fn):
