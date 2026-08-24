@@ -52,7 +52,8 @@ from ai_service_openai import (
     enrich_email_details_from_attachments, extract_property_asset,
     extract_valuation_email,
 )
-from report_service import fill_docx_template, fill_excel_template
+from location_service import nearby_facilities
+from report_service import document_summary_remark, fill_docx_template, fill_excel_template
 
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
@@ -113,16 +114,27 @@ def offline_ocr_text(filename: str, content: bytes) -> str:
         images = []
         if ext == ".pdf":
             document = fitz.open(stream=content, filetype="pdf")
-            max_pages = max(1, int(os.getenv("LOCAL_OCR_MAX_PAGES", "6")))
-            for page in document[:max_pages]:
+            max_pages = max(1, int(os.getenv("LOCAL_OCR_MAX_PAGES", "30")))
+            pages = []
+            for page_number, page in enumerate(document[:max_pages], start=1):
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
                 image = cv2.imdecode(
                     np.frombuffer(pixmap.tobytes("png"), dtype=np.uint8),
                     cv2.IMREAD_COLOR,
                 )
                 if image is not None:
-                    images.append(image)
+                    result, _ = _offline_ocr_engine(image)
+                    if result:
+                        text = "\n".join(
+                            str(line[1]).strip() for line in result
+                            if len(line) > 1 and str(line[1]).strip()
+                        )
+                        if text:
+                            pages.append(f"--- PAGE {page_number} ---\n{text}")
+                if sum(len(text) for text in pages) >= 50000:
+                    break
             document.close()
+            return "\n\n".join(pages)[:50000]
         else:
             image = cv2.imdecode(
                 np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR
@@ -992,6 +1004,17 @@ def normalized_application_number(value):
     return (key.lstrip("0") or "0") if key.isdigit() else key
 
 
+def normalized_assignment_type(value):
+    value = re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+    if "revisit" in value or "re visit" in value:
+        return "revisit"
+    if "subsequent" in value:
+        return "subsequent"
+    if "tranch" in value or re.search(r"\bpart\b", value):
+        return "part / tranche"
+    return value
+
+
 def is_followup_email(subject, body=""):
     """Return True for report reminders/status mails, not new visits or assignments."""
     subject_text = re.sub(r"\s+", " ", subject or "").strip()
@@ -1100,7 +1123,7 @@ def existing_case_for_duplicate_assignment(details, account, subject="", receive
     key = normalized_application_number(details.get("application_number", ""))
     if not key:
         return None
-    incoming_type = (details.get("case_type") or "").strip().casefold()
+    incoming_type = normalized_assignment_type(details.get("case_type"))
     candidates = ValuationCase.query.filter(
         ValuationCase.archived.is_(False),
     ).order_by(
@@ -1116,7 +1139,7 @@ def existing_case_for_duplicate_assignment(details, account, subject="", receive
         return next(
             (
                 item for item in matches
-                if (item.case_type or "").strip().casefold() == incoming_type
+                if normalized_assignment_type(item.case_type) == incoming_type
                 and incoming_subject
                 and normalized_email_subject(item.email_subject) == incoming_subject
                 and (
@@ -1129,7 +1152,7 @@ def existing_case_for_duplicate_assignment(details, account, subject="", receive
     return next(
         (
             item for item in matches
-            if (item.case_type or "").strip().casefold()
+            if normalized_assignment_type(item.case_type)
             not in {"subsequent", "revisit", "part / tranche"}
         ),
         None,
@@ -1144,7 +1167,7 @@ def merge_cross_mailbox_duplicate_cases():
         ValuationCase.id.asc(),
     ).all():
         key = normalized_application_number(case.application_number)
-        kind = (case.case_type or "").strip().casefold()
+        kind = normalized_assignment_type(case.case_type)
         if not key:
             continue
         if kind in {"subsequent", "revisit", "part / tranche"}:
@@ -1860,6 +1883,118 @@ def fetch_email_account(
         return _fetch_email_account_unlocked(
             account, start_date, end_date, enrich_documents=enrich_documents
         )
+    finally:
+        _email_fetch_lock.release()
+
+
+def _fetch_email_account_range_unlocked(
+    account: EmailAccount, start_date, end_date, enrich_documents=False,
+    retry_attempts=2,
+):
+    """Fetch a manual date range in restartable one-day mailbox scans."""
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+    totals = {
+        "created": 0, "updated": 0, "ignored": 0, "deduplicated": 0,
+    }
+    warnings = []
+    completed_days = 0
+    day = start_date
+    while day <= end_date:
+        final_result = None
+        for attempt in range(max(1, retry_attempts)):
+            try:
+                result = _fetch_email_account_unlocked(
+                    account, day, day, enrich_documents=enrich_documents
+                )
+            except Exception as exc:
+                db.session.rollback()
+                app.logger.warning(
+                    "Manual MIS fetch failed for %s on %s (attempt %s): %s",
+                    account.email, day, attempt + 1, exc,
+                )
+                result = {
+                    "created": 0, "updated": 0, "ignored": 0,
+                    "deduplicated": 0,
+                    "message": f"Partial fetch {day:%d-%m-%Y} to {day:%d-%m-%Y}",
+                    "warning": str(exc),
+                }
+            final_result = result
+            for key in totals:
+                totals[key] += result.get(key, 0)
+            message = result.get("message", "")
+            retryable_failure = (
+                message.startswith("Partial fetch")
+                or message == "Mailbox folder search failed"
+            )
+            if not retryable_failure:
+                completed_days += 1
+                if result.get("warning"):
+                    warnings.append(f"{day:%d-%m-%Y}: {result['warning']}")
+                break
+            if attempt + 1 < max(1, retry_attempts):
+                db.session.remove()
+                account = db.session.get(EmailAccount, account.id) or account
+        if final_result and (
+            final_result.get("message", "").startswith("Partial fetch")
+            or final_result.get("message") == "Mailbox folder search failed"
+        ):
+            warnings.append(
+                f"{day:%d-%m-%Y}: not completed after {max(1, retry_attempts)} attempts; "
+                f"{final_result.get('warning') or final_result.get('message')}"
+            )
+        day += timedelta(days=1)
+    requested_days = (end_date - start_date).days + 1
+    totals.update({
+        "message": (
+            f"Verified {completed_days}/{requested_days} day(s), "
+            f"{start_date:%d-%m-%Y} to {end_date:%d-%m-%Y}"
+        ),
+        "warning": "; ".join(warnings),
+        "completed_days": completed_days,
+        "requested_days": requested_days,
+    })
+    return totals
+
+
+def fetch_email_account_range(
+    account: EmailAccount, start_date, end_date, enrich_documents=False,
+):
+    """Manual From/To recovery; one lock covers every requested day."""
+    if not _email_fetch_lock.acquire(blocking=False):
+        return {
+            "created": 0, "updated": 0, "ignored": 0, "deduplicated": 0,
+            "completed_days": 0,
+            "requested_days": abs((end_date - start_date).days) + 1,
+            "message": "Mailbox scan already running.",
+            "warning": "Another MIS scan is already running. Please press Fetch again.",
+        }
+    try:
+        return _fetch_email_account_range_unlocked(
+            account, start_date, end_date, enrich_documents=enrich_documents
+        )
+    finally:
+        _email_fetch_lock.release()
+
+
+def fetch_email_accounts_range(accounts, start_date, end_date):
+    """Fetch all linked mailboxes without letting the scheduler split the run."""
+    accounts = list(accounts)
+    if not _email_fetch_lock.acquire(blocking=False):
+        return [(account, {
+            "created": 0, "updated": 0, "ignored": 0, "deduplicated": 0,
+            "completed_days": 0,
+            "requested_days": abs((end_date - start_date).days) + 1,
+            "message": "Mailbox scan already running.",
+            "warning": "Another MIS scan is already running. Please press Fetch again.",
+        }) for account in accounts]
+    results = []
+    try:
+        for account in accounts:
+            results.append((account, _fetch_email_account_range_unlocked(
+                account, start_date, end_date, enrich_documents=False
+            )))
+        return results
     finally:
         _email_fetch_lock.release()
 
@@ -2623,12 +2758,14 @@ def dashboard():
     cases = query.order_by(
         db.func.coalesce(ValuationCase.email_received_at, ValuationCase.created_at).desc()
     ).limit(2000).all()
+    stats_from, stats_to = current_month_range()
+    monthly_active_cases = filter_cases_by_dates(
+        ValuationCase.query.filter_by(archived=False), stats_from, stats_to
+    )
     stats = {
-        "cases": filter_billing_ready_cases(
-            ValuationCase.query.filter_by(archived=False)
-        ).count(),
-        "review_cases": ValuationCase.query.filter_by(
-            archived=False, status="Email Parsed - Review"
+        "cases": filter_billing_ready_cases(monthly_active_cases).count(),
+        "review_cases": monthly_active_cases.filter(
+            ValuationCase.status == "Email Parsed - Review"
         ).count(),
         "reports": FileAsset.query.filter_by(asset_type="report").count(),
     }
@@ -2636,6 +2773,7 @@ def dashboard():
         "dashboard.html", cases=cases, stats=stats, search=search,
         include_archived=include_archived, show_review=show_review,
         date_from=date_from, date_to=date_to,
+        stats_from=stats_from, stats_to=stats_to,
         engineers=SiteEngineer.query.filter_by(active=True).order_by(SiteEngineer.name).all(),
         whatsapp_groups=WhatsAppGroup.query.filter_by(active=True).order_by(WhatsAppGroup.name).all(),
         ai_enabled=ai_enabled(), ai_model=OPENAI_MODEL,
@@ -2813,13 +2951,31 @@ def import_mis():
     created = 0
     matched = 0
     active_cases = ValuationCase.query.filter_by(archived=False).all()
+
     for row in rows:
         app_key = normalized_application_number(row.get("application_number"))
         received_at = row.get("received_at")
-        target = next((
+        incoming_type = normalized_assignment_type(row.get("case_type"))
+        app_matches = [
             case for case in active_cases
             if app_key and normalized_application_number(case.application_number) == app_key
+        ]
+        target = next((
+            case for case in app_matches
+            if received_at
+            and (case.email_received_at or case.created_at).date() == received_at.date()
+            and normalized_assignment_type(case.case_type) == incoming_type
         ), None)
+        distinct_assignment = incoming_type in {
+            "revisit", "subsequent", "part / tranche",
+        }
+        if target is None and app_matches and not distinct_assignment:
+            target = next((
+                case for case in app_matches
+                if normalized_assignment_type(case.case_type) not in {
+                    "revisit", "subsequent", "part / tranche",
+                }
+            ), app_matches[0])
         if target is None and not app_key:
             customer_key = re.sub(r"\s+", " ", str(row.get("customer_name") or "")).strip().casefold()
             bank_key = re.sub(r"\s+", " ", str(row.get("bank_name") or "")).strip().casefold()
@@ -2843,13 +2999,32 @@ def import_mis():
             created += 1
         else:
             matched += 1
+            # A user-uploaded MIS is the billing/reconciliation source of truth.
+            # Earlier we only filled blank fields on an existing email case. That
+            # left rows stuck in "Email Parsed - Review" (hidden from Clean MIS)
+            # even when the uploaded MIS had a completed status such as
+            # "Report Sent" or "Visit Pending". Keep the duplicate-safe match,
+            # but let the uploaded MIS correct billing date/status.
+            if received_at:
+                target.email_received_at = received_at
+            imported_status = str(row.get("status") or "").strip()
+            if imported_status:
+                target.status = imported_status
         for field in (
             "application_number", "customer_name", "contact_number", "bank_name",
             "case_type", "property_address", "visit_by", "branch_name",
         ):
             value = str(row.get(field) or "").strip()
-            if value and not str(getattr(target, field) or "").strip():
+            # The uploaded human-reviewed MIS is authoritative for visible MIS
+            # fields. Preserve the original email/source assets, but correct
+            # parser placeholders and spelling instead of only filling blanks.
+            if value:
                 setattr(target, field, value)
+        distance = str(row.get("distance") or "").strip()
+        if distance:
+            stored = safe_json(target.extracted_json)
+            stored.setdefault("mis_import", {})["distance_from_branch"] = distance
+            target.extracted_json = json.dumps(stored, ensure_ascii=False)
     db.session.commit()
     deduplicated = merge_cross_mailbox_duplicate_cases()
     flash(
@@ -3847,6 +4022,38 @@ def resolve_case_report_template(case, template_id=""):
     return template
 
 
+def enrich_report_profile(case, profile):
+    nearby_keys = (
+        "nearest_railway_station", "nearest_hospital", "nearest_major_road",
+        "nearest_school_college", "other_nearby_facility",
+    )
+    if profile.get("latitude") and profile.get("longitude") and not all(
+        profile.get(key) for key in nearby_keys
+    ):
+        nearby = nearby_facilities(profile.get("latitude"), profile.get("longitude"))
+        for key, value in nearby.items():
+            if value not in ("", None):
+                profile[key] = value
+        if nearby:
+            latest_stored = safe_json(case.extracted_json)
+            latest_case_profile = dict(latest_stored.get("case_profile") or {})
+            latest_case_profile.update(nearby)
+            latest_stored["case_profile"] = latest_case_profile
+            case.extracted_json = json.dumps(
+                latest_stored, ensure_ascii=False, default=str
+            )
+            db.session.add(case)
+            db.session.commit()
+    document_remark = document_summary_remark(profile)
+    existing_remark = str(profile.get("remarks") or "").strip()
+    if existing_remark.startswith("DRAFT: valuation figures pending review"):
+        existing_remark = ""
+    profile["remarks"] = " ".join(
+        item for item in (document_remark, existing_remark) if item
+    )
+    return profile
+
+
 @app.route("/cases/<int:case_id>/local-report-data")
 @login_required
 def local_report_data(case_id):
@@ -3866,6 +4073,7 @@ def local_report_data(case_id):
         "report_date": datetime.now(APP_TIMEZONE).strftime("%d-%m-%Y"),
         **valuation_as_dict(valuation),
     })
+    profile = enrich_report_profile(case, profile)
     assets = FileAsset.query.options(defer(FileAsset.content)).filter(
         FileAsset.case_id == case_id,
         FileAsset.asset_type.in_(("document", "visit_data", "photo")),
@@ -4031,6 +4239,7 @@ def generate_report(case_id):
         "report_date": datetime.now(APP_TIMEZONE).strftime("%d-%m-%Y"),
         **valuation_as_dict(valuation),
     })
+    profile = enrich_report_profile(case, profile)
     photo_assets = [
         {
             "filename": asset.filename,
@@ -4165,6 +4374,14 @@ def archive_case(case_id):
     case.archived = not case.archived
     case.status = "Archived" if case.archived else "Reopened"
     db.session.commit()
+    if request.form.get("return_to_review") == "1":
+        return redirect(url_for(
+            "dashboard", review="1",
+            **{
+                "from": request.form.get("from", ""),
+                "to": request.form.get("to", ""),
+            },
+        ) + "#mis-cases")
     return redirect(url_for("dashboard", archived="1" if case.archived else "0"))
 
 
@@ -4234,13 +4451,14 @@ def fetch_one_email(account_id):
     date_from = parse_iso_date(request.form.get("from"), default_from)
     date_to = parse_iso_date(request.form.get("to"), default_to)
     try:
-        result = fetch_email_account(
+        result = fetch_email_account_range(
             account, date_from, date_to, enrich_documents=False
         )
         flash(
             f"{result['created']} new, {result.get('updated', 0)} corrected valuation "
             f"case(s); {result.get('deduplicated', 0)} duplicate MIS row(s) merged; "
-            f"{result['ignored']} unrelated email(s) ignored."
+            f"{result['ignored']} unrelated email(s) ignored; "
+            f"{result.get('completed_days', 0)}/{result.get('requested_days', 0)} day(s) verified."
             + (f" {result.get('warning')}" if result.get("warning") else ""),
             "error" if result.get("warning") else "success",
         )
@@ -4258,18 +4476,20 @@ def fetch_all_emails():
     errors = []
     warnings = []
     ignored = 0
+    completed_days = 0
+    requested_days = 0
     default_from, default_to = current_month_range()
     date_from = parse_iso_date(request.form.get("from"), default_from)
     date_to = parse_iso_date(request.form.get("to"), default_to)
-    for account in EmailAccount.query.filter_by(active=True).all():
+    accounts = EmailAccount.query.filter_by(active=True).all()
+    for account, result in fetch_email_accounts_range(accounts, date_from, date_to):
         try:
-            result = fetch_email_account(
-                account, date_from, date_to, enrich_documents=False
-            )
             total += result["created"]
             updated += result.get("updated", 0)
             deduplicated += result.get("deduplicated", 0)
             ignored += result["ignored"]
+            completed_days += result.get("completed_days", 0)
+            requested_days += result.get("requested_days", 0)
             if result.get("warning"):
                 warnings.append(f"{account.email}: {result['warning']}")
         except Exception as exc:
@@ -4279,6 +4499,7 @@ def fetch_all_emails():
         f"{total} valuation case(s) added; {updated} existing case(s) corrected; "
         f"{deduplicated} duplicate MIS row(s) merged; "
         f"{ignored} unrelated email(s) ignored. "
+        f"{completed_days}/{requested_days} mailbox-day(s) verified. "
         f"Range: {date_from:%d-%m-%Y} to {date_to:%d-%m-%Y}."
         + (f" Warnings: {'; '.join(warnings)}" if warnings else "")
         + (f" Errors: {'; '.join(errors)}" if errors else ""),
@@ -4417,6 +4638,34 @@ def scheduled_email_fetch():
                     pass
 
 
+def scheduled_email_catchup():
+    """Recover a short offline window without turning the minute job into a sweep."""
+    with app.app_context():
+        today = datetime.now(APP_TIMEZONE).date()
+        lookback_days = max(2, int(os.getenv("AUTO_FETCH_LOOKBACK_DAYS", "3")))
+        start_date = today - timedelta(days=lookback_days - 1)
+        for account in EmailAccount.query.filter_by(active=True).all():
+            try:
+                result = fetch_email_account(
+                    account, start_date, today, enrich_documents=False
+                )
+                app.logger.info(
+                    "Scheduled MIS catch-up completed for %s (%s to %s): %s new, %s updated",
+                    account.email,
+                    start_date,
+                    today,
+                    result.get("created", 0),
+                    result.get("updated", 0),
+                )
+            except Exception as exc:
+                app.logger.warning(
+                    "Scheduled email catch-up failed for %s: %s", account.email, exc
+                )
+            finally:
+                db.session.remove()
+                gc.collect()
+
+
 def start_scheduler():
     if not BackgroundScheduler:
         return
@@ -4432,6 +4681,15 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+    )
+    # Recover the previous two days once after every laptop/app start. Older
+    # ranges run only when the user explicitly selects From/To and presses Fetch.
+    scheduler.add_job(
+        scheduled_email_catchup,
+        "date",
+        run_date=datetime.now() + timedelta(seconds=10),
+        id="email_catchup_startup",
+        replace_existing=True,
     )
     scheduler.start()
 

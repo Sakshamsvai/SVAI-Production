@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="stats">
-  <a class="stat stat-link" href="{{ url_for('dashboard') }}"><span>Billing MIS Cases</span><b>{{ stats.cases }}</b><small>Clean invoice-ready list</small></a>
-  <a class="stat stat-link" href="{{ url_for('dashboard', review='1') }}"><span>Needs Details</span><b>{{ stats.review_cases }}</b><small>Not included in MIS Excel</small></a>
+  <a class="stat stat-link" href="{{ url_for('dashboard', from=stats_from.isoformat(), to=stats_to.isoformat()) }}#mis-cases"><span>Current Month MIS Cases</span><b>{{ stats.cases }}</b><small>1st date to today · click to open list</small></a>
+  <a class="stat stat-link" href="{{ url_for('dashboard', review='1', from=stats_from.isoformat(), to=stats_to.isoformat()) }}#mis-cases"><span>Needs Details This Month</span><b>{{ stats.review_cases }}</b><small>Click to check incomplete cases</small></a>
   <a class="stat stat-link" href="{{ url_for('reports_page') }}"><span>Generated Reports</span><b>{{ stats.reports }}</b><small>Open, view case &amp; download</small></a>
 </section>
 
@@ -38,15 +38,16 @@
       <label class="button secondary">Import Existing MIS<input type="file" name="mis_file" accept=".xlsx" required hidden></label>
       <button type="submit">Add / Merge Cases</button>
     </form>
-    <span class="note">Auto fetch: today every 1 minute · older dates: select From/To and Fetch manually</span>
+    <span class="note">Auto fetch: current day every 1 minute · previous 2 days checked once when app starts · older dates scan only when you select From/To and press Fetch</span>
   </div>
 </section>
 
-<section class="card">
+<section class="card" id="mis-cases">
   <div class="section-head">
     <div>
       <h2>{{ date_from.strftime('%d %b %Y') }} – {{ date_to.strftime('%d %b %Y') }}</h2>
       <p>{{ 'Needs Details queue' if show_review else 'Clean billing MIS' }} · {{ cases|length }} case(s) shown</p>
+      {% if show_review %}<p class="note">These emails need checking because customer, application, bank or case details may be incomplete. Open a useful case; remove an unrelated case from MIS.</p>{% endif %}
     </div>
   </div>
   <div class="table-wrap">
@@ -87,9 +88,18 @@
           <td>{{ case.branch_name or '—' }}</td>
           <td class="row-actions">
             <a class="mini-button" href="{{ url_for('case_detail', case_id=case.id) }}">Open</a>
+            {% if show_review %}
+            <form method="post" action="{{ url_for('archive_case', case_id=case.id) }}" onsubmit="return confirm('Yeh case current MIS se hata diya jayega aur Archived me safe rahega. Remove karein?');">
+              <input type="hidden" name="return_to_review" value="1">
+              <input type="hidden" name="from" value="{{ date_from.isoformat() }}">
+              <input type="hidden" name="to" value="{{ date_to.isoformat() }}">
+              <button class="small danger" type="submit">Remove from MIS</button>
+            </form>
+            {% else %}
             <form method="post" action="{{ url_for('delete_case', case_id=case.id) }}" onsubmit="return confirm('Sirf SVAI MIS se case aur yahan saved files delete hongi. Gmail/Yahoo mail safe rahega. Delete karein?');">
               <button class="small danger" type="submit">Delete</button>
             </form>
+            {% endif %}
           </td>
         </tr>
       {% else %}

@@ -257,6 +257,17 @@ KNOWN_CELL_MAPPINGS = {
         "B44": ("person_met_contact",),
         "D44": ("negative_area",),
         "F44": ("community_dominated_area",),
+        "B47": ("nearest_railway_station_distance",),
+        "C47": ("nearest_railway_station",),
+        "B48": ("nearest_hospital_distance",),
+        "C48": ("nearest_hospital",),
+        "B49": ("nearest_major_road_distance",),
+        "C49": ("nearest_major_road",),
+        "B50": ("nearest_school_college_distance",),
+        "C50": ("nearest_school_college",),
+        "B51": ("other_nearby_facility_distance",),
+        "C51": ("other_nearby_facility",),
+        "B52": ("community_dominated_area",),
         "C55": ("builtup_area_as_per_site", "builtup_area"),
         "C56": ("builtup_area_as_per_docs",),
         "C57": ("builtup_area_as_per_site", "builtup_area"),
@@ -366,6 +377,21 @@ def _display(value):
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)
     return value
+
+
+def document_summary_remark(profile):
+    document_type = _first(profile, "document_type")
+    owner = _first(profile, "owner_name")
+    registration_date = _first(profile, "registration_date")
+    if not document_type and not owner and not registration_date:
+        return ""
+    document_name = str(document_type or "property document").strip().title()
+    parts = [f"We have received {document_name}"]
+    if owner:
+        parts.append(f"in favour of {owner}")
+    if registration_date:
+        parts.append(f"registered on {registration_date}")
+    return " ".join(parts) + "."
 
 
 def _numeric_value(value):
@@ -534,15 +560,15 @@ def fill_known_excel_cells(workbook, profile, layout_key):
 
 
 NUMBERED_PROPERTY_PHOTO_CATEGORIES = {
-    1: "Front Side View",
-    2: "Front Elevation",
-    3: "Distant Property View",
-    4: "Front Side View",
+    1: "Other Site Photo",
+    2: "Front Side View",
+    3: "Approach Road",
+    4: "Distant Property View",
     5: "Internal Room",
     6: "Internal Room",
     7: "Internal Room",
     8: "Kitchen",
-    9: "Other Site Photo",
+    9: "Front Elevation",
     10: "Electricity Meter",
 }
 
@@ -599,21 +625,15 @@ def _excel_image(asset, max_width, max_height):
     with PillowImage.open(stream) as image:
         image = ImageOps.exif_transpose(image)
         category = _effective_photo_category(asset)
-        protected = category in {"Property Document", "Site Sketch", "Location Map", "MP Kisan"}
-        if protected:
-            width, height = image.size
-            prepared = image.convert("RGB")
-            ratio = min(max_width / max(width, 1), max_height / max(height, 1))
-            output_width = max(40, int(width * ratio))
-            output_height = max(40, int(height * ratio))
-        else:
-            output_width, output_height = int(max_width), int(max_height)
-            prepared = ImageOps.fit(
-                image.convert("RGB"),
-                (output_width, output_height),
-                method=PillowImage.Resampling.LANCZOS,
-                centering=(0.5, 0.5),
-            )
+        width, height = image.size
+        prepared = image.convert("RGB")
+        ratio = min(max_width / max(width, 1), max_height / max(height, 1))
+        output_width = max(40, int(width * ratio))
+        output_height = max(40, int(height * ratio))
+        prepared = prepared.resize(
+            (output_width, output_height),
+            resample=PillowImage.Resampling.LANCZOS,
+        )
         image_stream = io.BytesIO()
         prepared.save(image_stream, format="PNG", optimize=True)
         image_stream.seek(0)

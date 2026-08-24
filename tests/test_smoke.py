@@ -33,11 +33,16 @@ os.environ.update({
 })
 
 from ai_service_openai import (  # noqa: E402
-    build_case_profile, deterministic_email_candidate,
+    _asset_parts, _focused_pdf_content, build_case_profile, deterministic_email_candidate,
+    classify_property_photo,
     enrich_email_details_from_attachments, extract_property_asset,
     regex_email_extract,
+    normalize_boundary_english,
 )
-from report_service import fill_docx_template, fill_excel_template  # noqa: E402
+from location_service import nearby_facilities  # noqa: E402
+from report_service import (  # noqa: E402
+    _excel_image, document_summary_remark, fill_docx_template, fill_excel_template,
+)
 from local_report_worker import app as local_worker_app  # noqa: E402
 from server import (  # noqa: E402
     BillingTemplate, EmailAccount, FileAsset, SiteEngineer, WhatsAppGroup, User, ValuationCase,
@@ -50,7 +55,7 @@ from server import (  # noqa: E402
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
     email_fetch_folders, mis_import_rows,
     concise_mis_address, mailbox_source, normalize_whatsapp_group_link,
-    fetch_email_account, fetch_full_message, fetch_mis_message,
+    fetch_email_account, fetch_email_account_range, fetch_full_message, fetch_mis_message,
     enrich_missing_address_from_email_document, imap_safe_assignment_folders,
     archived_case_has_assignment_identity, recover_structured_archived_cases,
     staff_payment_amounts, staff_names_from_workbook,
@@ -59,6 +64,79 @@ from server import (  # noqa: E402
 
 
 class SvaiSmokeTests(unittest.TestCase):
+    def test_document_summary_remark_uses_owner_type_and_date(self):
+        self.assertEqual(
+            document_summary_remark({
+                "document_type": "sale deed",
+                "owner_name": "Mohan Singh",
+                "registration_date": "18/08/2023",
+            }),
+            "We have received Sale Deed in favour of Mohan Singh registered on 18/08/2023.",
+        )
+
+    def test_focused_pdf_keeps_property_boundary_pages(self):
+        from pypdf import PdfReader, PdfWriter
+        writer = PdfWriter()
+        for _ in range(10):
+            writer.add_blank_page(width=100, height=100)
+        source = io.BytesIO()
+        writer.write(source)
+        focused = _focused_pdf_content(
+            source.getvalue(),
+            "--- PAGE 1 ---\nRegistration document\n"
+            "--- PAGE 7 ---\nCO-OWNER DEED 1305 SQ FT ROAD\n",
+        )
+        self.assertEqual(len(PdfReader(io.BytesIO(focused)).pages), 2)
+
+    def test_hindi_boundary_terms_are_standardized_in_english(self):
+        self.assertEqual(normalize_boundary_english("रास्ता"), "Road")
+        self.assertEqual(normalize_boundary_english("मोहन जी का भूखंड"), "Plot of मोहन जी")
+        self.assertEqual(normalize_boundary_english("रामचन्द्र जी का मकान"), "House of रामचन्द्र जी")
+
+    def test_nearby_facilities_are_selected_from_one_map_response(self):
+        payload = {"elements": [
+            {"lat": 23.50, "lon": 76.08, "tags": {"railway": "station", "name": "Makdon Station"}},
+            {"lat": 23.51, "lon": 76.09, "tags": {"amenity": "hospital", "name": "Civil Hospital"}},
+            {"lat": 23.52, "lon": 76.10, "tags": {"amenity": "school", "name": "Govt School"}},
+            {"center": {"lat": 23.49, "lon": 76.07}, "tags": {"highway": "primary", "name": "State Highway 17"}},
+            {"lat": 23.505, "lon": 76.081, "tags": {"amenity": "bank", "name": "Nearby Bank"}},
+        ]}
+        with patch(
+            "location_service.urllib.request.urlopen",
+            return_value=io.BytesIO(json.dumps(payload).encode("utf-8")),
+        ) as lookup:
+            result = nearby_facilities(23.509126, 76.084618)
+        self.assertEqual(result["nearest_railway_station"], "Makdon Station")
+        self.assertEqual(result["nearest_hospital"], "Civil Hospital")
+        self.assertEqual(result["nearest_major_road"], "State Highway 17")
+        self.assertEqual(result["nearest_school_college"], "Govt School")
+        self.assertEqual(result["other_nearby_facility"], "Nearby Bank")
+        self.assertEqual(result["community_dominated_area"], "Not assessed from map data")
+        lookup.assert_called_once()
+
+    def test_standard_numbered_photos_are_classified_without_paid_ai(self):
+        with patch("ai_service_openai._responses_json") as paid_call:
+            result = classify_property_photo("property_photos_9.jpeg", b"image")
+        self.assertEqual(result["category"], "Front Elevation")
+        paid_call.assert_not_called()
+
+    def test_scanned_pdf_keeps_original_file_alongside_local_ocr(self):
+        parts = _asset_parts("sale_deed.pdf", b"%PDF-demo", "imperfect OCR")
+        self.assertEqual([part["type"] for part in parts], ["input_text", "input_file"])
+        self.assertIn("imperfect OCR", parts[0]["text"])
+        self.assertTrue(parts[1]["file_data"].startswith("data:application/pdf;base64,"))
+
+    def test_excel_photo_preserves_full_aspect_ratio(self):
+        stream = io.BytesIO()
+        Image.new("RGB", (1200, 600), "white").save(stream, format="JPEG")
+        image = _excel_image(
+            {"filename": "property_photos_1.jpeg", "category": "Front Side View", "content": stream.getvalue()},
+            240,
+            230,
+        )
+        self.assertEqual(image.width, 240)
+        self.assertEqual(image.height, 120)
+
     @classmethod
     def setUpClass(cls):
         app.config.update(TESTING=True)
@@ -224,6 +302,37 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(result["created"], 0)
         self.assertIn("connection failed", result["warning"])
 
+    def test_manual_date_range_fetches_each_day_and_retries_failed_day(self):
+        account = EmailAccount(id=77, email="range-fetch@gmail.com", provider="gmail")
+        first_day = datetime(2026, 8, 10).date()
+        second_day = datetime(2026, 8, 11).date()
+        calls = []
+
+        def fake_fetch(_account, start_date, end_date, enrich_documents=False):
+            calls.append((start_date, end_date, enrich_documents))
+            if start_date == first_day and calls.count((first_day, first_day, False)) == 1:
+                return {
+                    "created": 0, "updated": 0, "ignored": 0,
+                    "deduplicated": 0, "message": "Partial fetch 10-08-2026 to 10-08-2026",
+                    "warning": "Mailbox connection failed or ended early",
+                }
+            return {
+                "created": 1, "updated": 0, "ignored": 0,
+                "deduplicated": 0, "message": f"Fetched {start_date:%d-%m-%Y}",
+                "warning": "",
+            }
+
+        with app.app_context(), patch(
+            "server._fetch_email_account_unlocked", side_effect=fake_fetch
+        ):
+            result = fetch_email_account_range(account, first_day, second_day)
+
+        self.assertEqual([call[0] for call in calls], [first_day, first_day, second_day])
+        self.assertEqual(result["completed_days"], 2)
+        self.assertEqual(result["requested_days"], 2)
+        self.assertEqual(result["created"], 2)
+        self.assertEqual(result["warning"], "")
+
     def test_configured_admin_password_repairs_stale_persistent_hash(self):
         address = "render-admin@example.com"
         configured_password = "ConfiguredPassword123!"
@@ -312,8 +421,11 @@ class SvaiSmokeTests(unittest.TestCase):
         self.login()
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Auto fetch: today every 1 minute", response.data)
-        self.assertIn(b"select From/To and Fetch manually", response.data)
+        self.assertIn(b"Auto fetch: current day every 1 minute", response.data)
+        self.assertIn(b"previous 2 days checked once when app starts", response.data)
+        self.assertIn(b"select From/To and press Fetch", response.data)
+        self.assertIn(b"Current Month MIS Cases", response.data)
+        self.assertIn(b"1st date to today", response.data)
         self.assertIn(b"60000", response.data)
         self.assertIn(b"Generated Reports", response.data)
         self.assertNotIn(b"Property Documents", response.data)
@@ -326,6 +438,18 @@ class SvaiSmokeTests(unittest.TestCase):
         source = inspect.getsource(__import__("server").scheduled_email_fetch)
         self.assertIn("account, today, today", source)
         self.assertNotIn("month_start", source)
+
+    def test_scheduler_has_bounded_offline_catchup(self):
+        import inspect
+
+        server_module = __import__("server")
+        catchup = inspect.getsource(server_module.scheduled_email_catchup)
+        startup = inspect.getsource(server_module.start_scheduler)
+        self.assertIn('AUTO_FETCH_LOOKBACK_DAYS', catchup)
+        self.assertIn('"3"', catchup)
+        self.assertIn("account, start_date, today", catchup)
+        self.assertIn('id="email_catchup_startup"', startup)
+        self.assertNotIn('id="email_catchup_hourly"', startup)
 
     def test_billing_fills_existing_invoice_table_with_km_slab_amount(self):
         workbook = Workbook()
@@ -1009,6 +1133,54 @@ class SvaiSmokeTests(unittest.TestCase):
             matches = ValuationCase.query.filter_by(application_number="IMPORT-2026-001").all()
             self.assertEqual(len(matches), 1)
             self.assertEqual(matches[0].customer_name, "Import Customer")
+
+    def test_mis_import_keeps_revisit_separate_and_corrects_reviewed_fields(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "ALL BANK"
+        sheet.append([
+            "SR NO", "Date", "CUSTOMER NAME", "APPLICATION NO", "CONTACT NUMBER",
+            "BANK", "CASE TYPE", "STATUS", "ADDRESS", "VISIT BY", "BRANCH", "K.M",
+        ])
+        sheet.append([
+            1, datetime(2026, 8, 7), "Correct Customer", "REVISIT-001",
+            "9876543210", "Correct Bank", "Fresh", "Report Sent",
+            "Correct Address", "Engineer", "Vidisha", 12,
+        ])
+        sheet.append([
+            2, datetime(2026, 8, 13), "Correct Customer", "REVISIT-001",
+            "9876543210", "Correct Bank", "Re Visit", "Visit Pending",
+            "Correct Address", "Engineer", "Vidisha", 12,
+        ])
+        stream = io.BytesIO()
+        workbook.save(stream)
+
+        with app.app_context():
+            original = ValuationCase(
+                application_number="REVISIT-001", customer_name="this",
+                bank_name="Wrong Parser Bank", case_type="Fresh",
+                email_received_at=datetime(2026, 8, 7), status="New - Email",
+                archived=False,
+            )
+            db.session.add(original)
+            db.session.commit()
+
+        self.login()
+        response = self.client.post("/mis/import", data={
+            "_csrf_token": self.csrf(),
+            "mis_file": (io.BytesIO(stream.getvalue()), "MIS.xlsx"),
+        }, content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            matches = ValuationCase.query.filter_by(application_number="REVISIT-001").order_by(
+                ValuationCase.email_received_at
+            ).all()
+            self.assertEqual(len(matches), 2)
+            self.assertEqual(matches[0].customer_name, "Correct Customer")
+            self.assertEqual(matches[0].bank_name, "Correct Bank")
+            self.assertEqual(matches[0].status, "Report Sent")
+            self.assertEqual(matches[1].case_type, "Re Visit")
+            self.assertEqual(matches[1].status, "Visit Pending")
 
     def test_email_fetch_includes_custom_incoming_folder_but_not_sent_or_junk(self):
         class MailboxList:
@@ -1935,6 +2107,17 @@ class SvaiSmokeTests(unittest.TestCase):
             "builtup_area_as_per_site": "920 sq ft",
             "land_rate": 850,
             "construction_rate": 1400,
+            "nearest_railway_station": "Test Station",
+            "nearest_railway_station_distance": "4.2 Km",
+            "nearest_hospital": "Test Hospital",
+            "nearest_hospital_distance": "1.1 Km",
+            "nearest_major_road": "Test Highway",
+            "nearest_major_road_distance": "2.0 Km",
+            "nearest_school_college": "Test School",
+            "nearest_school_college_distance": "0.8 Km",
+            "other_nearby_facility": "Test Bank",
+            "other_nearby_facility_distance": "0.5 Km",
+            "community_dominated_area": "Not assessed from map data",
         }
         sbfc_source = (root / "seed_templates" / "SBFC.xlsx").read_bytes()
         sbfc_output = fill_excel_template(
@@ -1949,6 +2132,13 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(sbfc["B37"].value, "Actual North")
         self.assertEqual(sbfc["E68"].value, "=C68*D68")
         self.assertEqual(sbfc["D70"].value, "=E68+E69")
+        self.assertEqual(sbfc["B47"].value, "4.2 Km")
+        self.assertEqual(sbfc["C47"].value, "Test Station")
+        self.assertEqual(sbfc["C48"].value, "Test Hospital")
+        self.assertEqual(sbfc["C49"].value, "Test Highway")
+        self.assertEqual(sbfc["C50"].value, "Test School")
+        self.assertEqual(sbfc["C51"].value, "Test Bank")
+        self.assertEqual(sbfc["B52"].value, "Not assessed from map data")
 
         laxmi_source = (root / "seed_templates" / "Laxmi India.xlsx").read_bytes()
         laxmi_output = fill_excel_template(
@@ -1964,7 +2154,7 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(laxmi._images[0].anchor._from.row + 1, 161)
         self.assertEqual(laxmi._images[0].anchor._from.col + 1, 1)
         self.assertEqual(int(laxmi._images[0].width), 360)
-        self.assertEqual(int(laxmi._images[0].height), 300)
+        self.assertEqual(int(laxmi._images[0].height), 225)
 
         no_site_profile = dict(profile)
         no_site_profile["property_address_as_per_site"] = ""

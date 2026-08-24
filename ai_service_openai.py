@@ -5,10 +5,12 @@ manual report work remain available when an API key is not configured.
 """
 
 import base64
+import io
 import json
 import os
 import re
 from pathlib import Path
+from pypdf import PdfReader, PdfWriter
 
 try:
     from openai import OpenAI
@@ -156,6 +158,25 @@ VISIT_AUTHORITY_FIELDS = SITE_ONLY_FIELDS | {
 }
 
 
+def normalize_boundary_english(value):
+    """Standardize common Hindi deed boundary terms without changing names."""
+    text = _space(value)
+    if not text:
+        return ""
+    exact = {
+        "रास्ता": "Road", "सड़क": "Road", "रोड": "Road",
+        "गली": "Gali", "भूमि": "Land", "जमीन": "Land",
+        "भूखंड": "Plot", "भूखण्ड": "Plot", "मकान": "House",
+    }
+    if text in exact:
+        return exact[text]
+    text = re.sub(r"^(.+?)\s+का\s+मकान$", r"House of \1", text)
+    text = re.sub(r"^(.+?)\s+का\s+भूख(?:ं|ण्)ड$", r"Plot of \1", text)
+    for hindi, english in exact.items():
+        text = text.replace(hindi, english)
+    return _space(text)
+
+
 def _enforce_asset_source_authority(extraction, source_kind):
     """Keep legal-document and physical-site facts in separate namespaces."""
     cleaned = {
@@ -176,6 +197,13 @@ def _enforce_asset_source_authority(extraction, source_kind):
         cleaned["survey_khasra_plot_no_as_per_docs"] = (
             cleaned.get("survey_khasra_plot_no_as_per_docs") or generic_survey
         )
+    for key in (
+        "north_boundary_as_per_docs", "south_boundary_as_per_docs",
+        "east_boundary_as_per_docs", "west_boundary_as_per_docs",
+        "north_boundary_as_per_site", "south_boundary_as_per_site",
+        "east_boundary_as_per_site", "west_boundary_as_per_site",
+    ):
+        cleaned[key] = normalize_boundary_english(cleaned.get(key, ""))
     return cleaned
 
 
@@ -913,6 +941,64 @@ def _asset_part(filename, content, extracted_text=""):
     return {"type": "input_text", "text": f"Filename: {filename}. No readable text was found."}
 
 
+def _focused_pdf_content(content, extracted_text, max_pages=6):
+    """Keep likely title/property/area/boundary pages for lower-cost deep reading."""
+    blocks = re.findall(
+        r"--- PAGE (\d+) ---\s*(.*?)(?=\n--- PAGE \d+ ---|\Z)",
+        extracted_text or "",
+        flags=re.S,
+    )
+    if not blocks:
+        return content
+    scored = []
+    for page_text, body in blocks:
+        upper = body.upper()
+        score = 0
+        if re.search(r"CO[\s-]*OWN|SALE\s+DEED|TITLE\s+DEED|PATTA", upper):
+            score += 5
+        if re.search(r"BOUNDAR|NORTH|SOUTH|EAST|WEST|ROAD|GALI", upper):
+            score += 6
+        if re.search(r"(?:AREA|SQ\.?\s*FT|SQ\.?\s*M|1305|121\.238)", upper):
+            score += 5
+        if re.search(r"OWNER|REGISTR|DOCUMENT|PROPERTY", upper):
+            score += 3
+        if score:
+            scored.append((score, int(page_text) - 1))
+    selected = {0}
+    selected.update(page for _, page in sorted(scored, reverse=True)[: max_pages - 1])
+    try:
+        reader = PdfReader(io.BytesIO(content))
+        selected = {page for page in selected if 0 <= page < len(reader.pages)}
+        if not selected or len(selected) >= len(reader.pages):
+            return content
+        writer = PdfWriter()
+        for page in sorted(selected):
+            writer.add_page(reader.pages[page])
+        output = io.BytesIO()
+        writer.write(output)
+        return output.getvalue()
+    except Exception:
+        return content
+
+
+def _asset_parts(filename, content, extracted_text=""):
+    """Keep local OCR as context without hiding the original scan from vision."""
+    ext = Path(filename).suffix.lower()
+    if extracted_text and ext in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}:
+        original = (
+            _focused_pdf_content(content, extracted_text)
+            if ext == ".pdf" else content
+        )
+        return [
+            {
+                "type": "input_text",
+                "text": f"Locally extracted content from {filename}:\n{extracted_text[:40000]}",
+            },
+            _asset_part(filename, original),
+        ]
+    return [_asset_part(filename, content, extracted_text)]
+
+
 def _empty_asset_extraction(source_kind):
     output = {key: "" for key in EXTRACTION_KEYS}
     output["source_kind"] = source_kind
@@ -1379,9 +1465,14 @@ For property_document sources, put legal/document facts only in *_as_per_docs.
 For visit_data sources, put measured/observed facts only in *_as_per_site.
 Keep all North/South/East/West boundaries separate. Read handwritten boundary,
 area, road, rate, map/coordinates and floor details carefully.
+Write every boundary in English only. Transliterate proper names and translate
+रास्ता/सड़क as Road, गली as Gali, भूमि/जमीन as Land, भूखंड as Plot,
+and "X का मकान" as "House of X".
 """
     try:
-        parsed = _responses_json(prompt, [_asset_part(filename, content, extracted_text)], effort="medium")
+        parsed = _responses_json(
+            prompt, _asset_parts(filename, content, extracted_text), effort="medium"
+        )
         combined = {
             key: parsed.get(key) or fallback.get(key, "")
             for key in EXTRACTION_KEYS
@@ -1397,6 +1488,19 @@ area, road, rate, map/coordinates and floor details carefully.
 def classify_property_photo(filename, content):
     fallback = "Other Site Photo"
     lower = Path(filename).stem.lower()
+    numbered_categories = {
+        1: "Other Site Photo", 2: "Front Side View", 3: "Approach Road",
+        4: "Distant Property View", 5: "Internal Room", 6: "Internal Room",
+        7: "Internal Room", 8: "Kitchen", 9: "Front Elevation",
+        10: "Electricity Meter",
+    }
+    numbered = re.search(r"property[_ -]*photos?[_ -]*(\d+)$", lower)
+    if numbered and int(numbered.group(1)) in numbered_categories:
+        return {
+            "category": numbered_categories[int(numbered.group(1))],
+            "confidence": 0.95,
+            "notes": "Standard numbered site-photo sequence; classified locally.",
+        }
     keyword_map = {
         "front": "Front Elevation", "elevation": "Front Elevation",
         "side": "Front Side View", "road": "Approach Road",
@@ -1504,6 +1608,8 @@ Authority rules:
    document clearly contains the same identifier.
 4. Keep document and site versions separate. Record conflicts in data_conflicts.
 5. Calculated valuation values come only from valuer_inputs.
+6. Write boundaries in English only; transliterate names and standardize Hindi
+   terms as Road, Gali, Land, Plot, and House of.
 
 Include every useful source field plus data_conflicts (array) and
 missing_critical_fields (array).
