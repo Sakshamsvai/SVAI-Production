@@ -1211,6 +1211,14 @@ def merge_cross_mailbox_duplicate_cases():
     return merged
 
 
+def invalid_email_customer_name(value):
+    return bool(re.search(
+        r"(?i)\b(?:not\s+interested|unable\s+to\s+take|cannot\s+take|"
+        r"can'?t\s+take|please\s+(?:remove|cancel|reassign)|declin(?:e|ed))\b",
+        str(value or ""),
+    )) or normalized_header(value) in {"leadid", "mobilenocompleteaddressof"}
+
+
 def apply_followup_to_existing_case(
     target, details, attachments, subject, received, unique_id,
     action="Merged into existing MIS case; no new row created",
@@ -1218,6 +1226,7 @@ def apply_followup_to_existing_case(
 ):
     if _message_already_recorded(target, unique_id):
         return False
+    legacy_header_loss = bool(target.source_email and not (target.email_subject or "").strip())
     fill_if_missing = {
         "customer_name": details.get("customer_name", ""),
         "contact_number": details.get("contact_number", ""),
@@ -1226,8 +1235,19 @@ def apply_followup_to_existing_case(
         "branch_name": details.get("branch_name", ""),
     }
     for field, value in fill_if_missing.items():
-        if value and not (getattr(target, field, "") or "").strip():
+        current = (getattr(target, field, "") or "").strip()
+        repair_from_header = legacy_header_loss and field in {"customer_name", "bank_name"}
+        repair_invalid_customer = field == "customer_name" and invalid_email_customer_name(current)
+        if value and (not current or repair_from_header or repair_invalid_customer):
             setattr(target, field, str(value).strip())
+        elif field == "customer_name" and invalid_email_customer_name(current):
+            target.customer_name = ""
+    if legacy_header_loss and subject:
+        target.email_subject = subject
+    if details.get("structured_au_table") and not details.get("case_type"):
+        target.case_type = ""
+        if target.status in {"New", "New - Email", "Email Parsed - Review"}:
+            target.status = "Email Parsed - Review"
     stored = safe_json(target.extracted_json)
     stored.setdefault("followup_emails", []).append({
         "message_id": unique_id,
@@ -1359,15 +1379,20 @@ def apply_email_details(case, details, account, subject, received, unique_id):
     }
     invalid_existing = {
         "application_number": {"applicant", "application", "app", "case", "lead"},
-        "customer_name": {"to be reviewed", "applicant", "customer", "pending"},
+        "customer_name": {"to be reviewed", "applicant", "customer", "pending", "mobile no complete address of"},
     }
     for field, value in values.items():
         current = (getattr(case, field, "") or "").strip()
-        invalid_current = current.casefold() in invalid_existing.get(field, set())
+        invalid_current = (
+            current.casefold() in invalid_existing.get(field, set())
+            or (field == "customer_name" and invalid_email_customer_name(current))
+        )
         if value and (not existing_row or not current or invalid_current):
             setattr(case, field, str(value).strip())
         elif invalid_current:
             setattr(case, field, "")
+    if details.get("structured_au_table") and not details.get("case_type"):
+        case.case_type = ""
     case.source_email = account.email
     case.source_message_id = case.source_message_id or unique_id
     case.email_subject = case.email_subject or subject
@@ -1515,7 +1540,19 @@ def fetch_mis_message(mail, msg_id):
     chunks = [item[1] for item in msg_data if isinstance(item, tuple) and item[1]]
     if not chunks:
         return None
-    return b"\r\n".join(chunks)
+    raw = chunks[0] if len(chunks) == 1 else b"\r\n\r\n".join(chunk.rstrip(b"\r\n") for chunk in chunks)
+    parsed = email_lib.message_from_bytes(raw)
+    if parsed.get("Subject") or parsed.get("From") or parsed.get("Message-ID"):
+        return raw
+    try:
+        header_status, header_data = mail.fetch(msg_id, "(BODY.PEEK[HEADER])")
+    except imaplib.IMAP4.error:
+        header_status, header_data = "BAD", []
+    if header_status == "OK":
+        header = next((item[1] for item in header_data if isinstance(item, tuple) and item[1]), b"")
+        if header:
+            return header.rstrip(b"\r\n") + b"\r\n\r\n" + raw.lstrip(b"\r\n")
+    return raw
 
 
 def fetch_full_message(mail, msg_id):
@@ -1720,6 +1757,7 @@ def _fetch_email_account_unlocked(
             sender = decode_header_value(message.get("From", ""))
             body = latest_email_body(email_body(message))
             followup_mail = is_followup_email(subject, body)
+            self_sent_mail = email_lib.utils.parseaddr(sender)[1].casefold() == account.email.casefold()
             unique_id = message.get("Message-ID") or (
                 f"{account.email}:{source_folder}:{msg_id.decode()}"
             )
@@ -1736,6 +1774,9 @@ def _fetch_email_account_unlocked(
             existing_case = existing_case_for_message(
                 account, unique_id, subject, received
             )
+            if self_sent_mail:
+                ignored += 1
+                continue
             if not is_valuation_email(subject, body, sender) and not followup_mail:
                 # A repeat fetch must never make an already reviewed/accepted
                 # MIS row disappear merely because a later parser version is

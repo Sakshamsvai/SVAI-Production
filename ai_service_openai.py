@@ -72,6 +72,9 @@ BANK_DOMAIN_NAMES = {
     "ujjivan": "Ujjivan Small Finance Bank",
     "wonderhfl": "Wonder Home Finance",
     "muthoothomefin": "Muthoot Homefin",
+    "aubank": "AU Small Finance Bank",
+    "easyhomefinance": "Easy Home Finance",
+    "easyhousing": "Easy Home Finance",
     "fusionfin": "Fusion Finance",
 }
 
@@ -323,6 +326,12 @@ def _clean_person_name(value):
         value,
         maxsplit=1,
     )[0].strip(" .,-/")
+    if re.search(
+        r"(?i)\b(?:not\s+interested|unable\s+to\s+take|cannot\s+take|"
+        r"can'?t\s+take|please\s+(?:remove|cancel|reassign)|declin(?:e|ed))\b",
+        value,
+    ):
+        return ""
     words = re.findall(r"[A-Za-z][A-Za-z'.-]*", value)
     rejected = {
         "applicant", "application", "borrower", "customer", "dear", "hello",
@@ -550,7 +559,9 @@ def _subject_fields(subject):
         })
 
     explicit_app = _first_match([
-        r"(?i)(?:lan|win|proposal|app(?:lication)?(?:\s+id)?|lead(?:\s+id)?|"
+        r"(?i)\bapplication\s*(?:no|number|id|#)\s*[:=.\-]*\s*"
+        r"([A-Z0-9][A-Z0-9/\-]{4,45})",
+        r"(?i)(?:lan|win|proposal|application(?:\s+id)?|app(?:\s+id)?|lead(?:\s+id)?|"
         r"loan|case|order|job)\s*(?:no|number|id|#)?\s*[:=\-]*\s*"
         r"([A-Z0-9][A-Z0-9/\-]{4,45})",
         r"(?i)\b((?:SBFCLAP|LAP|HLSA|BLSA|HVDS|HAHA|HNDP|LNDP|HFC)"
@@ -564,6 +575,8 @@ def _subject_fields(subject):
         result.setdefault("application_number", explicit_app)
 
     explicit_name = _first_match([
+        r"(?i)technical\s+report\s+of\s+the\s+cases?\s+of\s+"
+        r"([A-Za-z][A-Za-z .&'-]{2,70}?)\s*\([A-Z0-9][A-Z0-9/\-]{4,45}\)",
         r"(?i)in\s+the\s+name\s+of\s*(?:mr|mrs|ms|smt|shri)?\.?\s*"
         r"([A-Za-z][A-Za-z .&'-]{2,70}?)(?=\s*(?://|\|\||___|$))",
         r"(?i)(?:case\s+(?:name|of)|in\s+case(?:\s+of)?|"
@@ -726,9 +739,11 @@ def regex_email_extract(subject, body, sender):
     result = _subject_fields(subject)
 
     application_number = _first_match([
+        r"(?im)\bapplication\s*(?:no|number|id|#)\s*[:=.\-]*\s*"
+        r"([A-Z0-9][A-Z0-9/\-]{4,45})",
         r"(?im)(?:request\s+(?:id|details)|request\s*(?:no|number|#))"
         r"\s*[:=\-]?\s*([A-Z0-9][A-Z0-9/\-]{4,45})",
-        r"(?im)(?:(?:application|app|case|proposal|loan|deal)\s*"
+        r"(?im)(?:(?:application|app|case|proposal|loan|deal)\b\s*"
         r"(?:no|number|id|#)|lead\s*(?:id)?\s*(?:no|number|#)?)"
         r"\s*[:=\-]?\s*([A-Z0-9][A-Z0-9/\-]{4,45})",
         r"(?im)\b((?:SBFCLAP|LAP|HLSA|BLSA|HVDS|HAHA|HFC|DXJNP|APPL)"
@@ -770,6 +785,25 @@ def regex_email_extract(subject, body, sender):
         r"case|loan|boundar(?:y|ies)|area|land)\b|\n\s*\n|$)",
     ], text, lambda value: _space(value) if _valid_property_address(value) else "")
 
+    au_table = None
+    app_for_table = result.get("application_number") or application_number
+    if "aubank" in _sender_domain(sender) and app_for_table:
+        au_table = re.search(
+            rf"(?is)\b{re.escape(app_for_table)}\s+"
+            r"(?P<name>[A-Za-z][A-Za-z .&'-]{2,100}?)\s+"
+            r"(?P<mobile>[6-9]\d{9})\s+"
+            r"(?P<address>.+?)\s+\d{4,6}\s+"
+            r"[A-Za-z][A-Za-z .'-]{2,80}\s+[6-9]\d{9}\s+Om\s+Prakash\s+Meena\b",
+            safe_body,
+        )
+        if au_table:
+            result["customer_name"] = _clean_person_name(au_table.group("name"))
+            result["contact_number"] = au_table.group("mobile")
+            candidate_address = _space(au_table.group("address"))
+            if _valid_property_address(candidate_address):
+                result["property_address"] = candidate_address
+            result["structured_au_table"] = True
+
     for key, value in (
         ("application_number", application_number),
         ("customer_name", customer_name),
@@ -785,7 +819,9 @@ def regex_email_extract(subject, body, sender):
         r"([A-Za-z0-9 +/\-]{2,50})$",
     ], text, _normalize_case_type)
     result["case_type"] = (
-        explicit_case_type or _normalize_case_type(text) or result.get("case_type")
+        explicit_case_type
+        or ("" if au_table else _normalize_case_type(text))
+        or result.get("case_type")
     )
     is_valuation = deterministic_email_candidate(subject, body, sender)
     system_pending_mail = bool(re.search(
