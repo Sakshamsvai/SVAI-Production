@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Bill Setup · SVAI{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-head"><div><h1>Rate Cards &amp; Bill Formats</h1><p>Har bank/branch ka master bill format aur approved Rate Card yahan save rahega. Naya format/card upload karne par old record delete nahi hoga.</p></div><a class="button secondary" href="{{ url_for('billing_make_bill') }}">Open Excel Generator</a></div>
+</section>
+
+<section class="card">
+  <h2>Upload / Change Bill Format</h2>
+  <form method="post" enctype="multipart/form-data" class="form-grid three">
+    <input type="hidden" name="action" value="template">
+    <label>Bank Name<input name="bank_name" required placeholder="e.g. JM Financial Home Loans"></label>
+    <label>Branch (blank = all branches)<input name="branch_name" placeholder="e.g. Vidisha"></label>
+    <label>Final Bill Format (.xlsx / .docx)<input type="file" name="setup_file" accept=".xlsx,.docx" required></label>
+    <div class="full"><button class="green">Save New Bill Format</button></div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Upload / Change Rate Card</h2>
+  <p class="note">Rate card image/PDF evidence save hota hai. Fresh aur Subsequent/Revisit/Tranche ka KM-wise rule enter kar dein; blank rule ka matlab card only saved for review.</p>
+  <form method="post" enctype="multipart/form-data" class="form-grid three">
+    <input type="hidden" name="action" value="rate_card">
+    <label>Bank Name<input name="bank_name" required></label>
+    <label>Branch (blank = all branches)<input name="branch_name"></label>
+    <label>Rate Card (PDF / PNG / JPEG)<input type="file" name="setup_file" accept=".pdf,.png,.jpg,.jpeg" required></label>
+    <div class="full"><h3>Fresh KM rates</h3><div class="slab-grid">
+      {% for low, high in [(0,50),(50.01,90),(90.01,'')] %}<div class="slab-row"><label>Min KM<input name="fresh_min[]" type="number" step="0.01" value="{{ low }}"></label><label>Max KM<input name="fresh_max[]" type="number" step="0.01" value="{{ high }}"></label><label>Amount ₹<input name="fresh_amount[]" type="number" step="0.01"></label></div>{% endfor %}
+    </div></div>
+    <div class="full"><h3>Subsequent / Revisit / Tranche KM rates</h3><div class="slab-grid">
+      {% for low, high in [(0,50),(50.01,90),(90.01,'')] %}<div class="slab-row"><label>Min KM<input name="subsequent_min[]" type="number" step="0.01" value="{{ low }}"></label><label>Max KM<input name="subsequent_max[]" type="number" step="0.01" value="{{ high }}"></label><label>Amount ₹<input name="subsequent_amount[]" type="number" step="0.01"></label></div>{% endfor %}
+    </div></div>
+    <div class="full"><button class="green">Save New Rate Card</button></div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Saved Bill Formats</h2>
+  <div class="table-wrap"><table><thead><tr><th>Bank</th><th>Branch</th><th>Format</th><th>Saved</th></tr></thead><tbody>
+  {% for item in templates %}<tr><td>{{ item.bank_name }}</td><td>{{ item.branch_name or 'All branches' }}</td><td>{{ item.filename }}</td><td>{{ item.created_at.strftime('%d-%m-%Y %H:%M') }}</td></tr>{% else %}<tr><td colspan="4" class="empty">No bill format saved yet.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+
+<section class="card">
+  <h2>Saved Rate Cards</h2>
+  <div class="table-wrap"><table><thead><tr><th>Bank</th><th>Branch</th><th>Rate Card</th><th>Fresh Rules</th><th>Subsequent Rules</th><th></th></tr></thead><tbody>
+  {% for item in rate_cards %}{% set rules = rate_card_rules.get(item.id, {}) %}<tr><td>{{ item.bank_name }}</td><td>{{ item.branch_name or 'All branches' }}</td><td>{{ item.filename }}</td><td>{{ rules.get('Fresh', [])|length }} slab(s)</td><td>{{ rules.get('Subsequent', [])|length }} slab(s)</td><td><a class="mini-button" target="_blank" href="{{ url_for('billing_rate_card_view', rate_card_id=item.id) }}">View Rate Card</a></td></tr>{% else %}<tr><td colspan="6" class="empty">No rate card saved yet.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}
+
+
+

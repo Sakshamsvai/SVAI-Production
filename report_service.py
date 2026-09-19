@@ -11,6 +11,8 @@ from docx import Document
 from docx.shared import Inches
 from openpyxl import Workbook, load_workbook
 from openpyxl.drawing.image import Image as ExcelImage
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, TwoCellAnchor
+from openpyxl.utils.cell import coordinate_to_tuple
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from PIL import Image as PillowImage, ImageOps
@@ -342,6 +344,50 @@ KNOWN_CLEAR_CELLS = {
     },
 }
 
+# The valuer-approved 328-row Laxmi workbook is materially different from the
+# older 297-row sample. Keep its entry cells explicit so case data can never
+# remain in the reusable reference workbook.
+KNOWN_CELL_MAPPINGS["laxmi_final"] = {
+    "D8": ("visit_date", "report_date"), "I8": ("property_type",),
+    "D9": ("application_number",), "I9": ("case_type",),
+    "D10": ("customer_name", "applicant_name"), "D11": ("owner_name",),
+    "D12": ("contact_number",), "D13": ("land_tenure",),
+    "I13": ("occupancy",), "D14": ("document_type",), "I14": ("branch_name",),
+    "C15": ("property_address_as_per_docs",), "C16": ("property_address_as_per_site",),
+    "F18": ("property_usage_as_per_site", "property_type"),
+    "A20": ("distance_from_branch",), "C20": ("nearest_railway_station_distance",),
+    "F20": ("nearest_bus_stand_distance", "nearest_hospital_distance"),
+    "G23": ("surrounding_development_percent",), "G24": ("locality_class",),
+    "F31": ("approach_road_condition",), "F32": ("landmark",), "F33": ("amenities",),
+    "G37": ("land_area_as_per_docs", "land_area"),
+    "I37": ("land_area_as_per_site",), "K37": ("builtup_area_as_per_site", "builtup_area"),
+    "G38": ("land_area_as_per_site",), "G39": ("land_area_as_per_site",),
+    "G45": ("property_usage_as_per_site",), "G47": ("structure_type",),
+    "G48": ("property_age_years", "age_years"), "G50": ("occupancy",),
+    "G52": ("plot_demarcated",), "G53": ("property_identified_through",),
+    "D60": ("east_boundary_as_per_docs",), "F60": ("west_boundary_as_per_docs",),
+    "H60": ("north_boundary_as_per_docs",), "J60": ("south_boundary_as_per_docs",),
+    "D61": ("east_boundary_as_per_site",), "F61": ("west_boundary_as_per_site",),
+    "H61": ("north_boundary_as_per_site",), "J61": ("south_boundary_as_per_site",),
+    "G63": ("marketability",), "F68": ("construction_quality",),
+    "G74": ("structure_type",), "G75": ("number_of_floors",),
+    "G78": ("room_configuration",), "G80": ("plan_details",),
+    "G81": ("plan_details",), "G82": ("construction_permission",),
+    "G83": ("demolition_risk",), "F28": ("govt_land_rate",),
+    "E92": ("govt_construction_rate",), "E101": ("land_rate",),
+    "E103": ("construction_rate",), "B115": ("remarks",),
+    "B142": ("property_address_as_per_site",),
+    "C269": ("latitude",), "G269": ("longitude",),
+}
+KNOWN_NUMERIC_CELLS["laxmi_final"] = {
+    "G37", "I37", "K37", "G38", "G39", "G48", "F28", "E92", "E101", "E103",
+}
+KNOWN_CLEAR_CELLS["laxmi_final"] = set(KNOWN_CELL_MAPPINGS["laxmi_final"]) | {
+    "G22", "G23", "G24", "G25", "C28", "H28", "D56", "D57", "F57", "H57", "J57",
+    "G62", "G63", "J64", "J65", "B115", "B116", "B117", "B118", "B119", "B120",
+    "B121", "B122", "B123", "B124", "B125", "C126", "G126", "K126", "A131",
+}
+
 
 def _first(profile, *keys):
     for key in keys:
@@ -557,6 +603,62 @@ def fill_known_excel_cells(workbook, profile, layout_key):
         target.value = _display(value) if value not in ("", None, [], {}) else ""
     for coordinate, formula in KNOWN_FIXED_FORMULAS.get(layout_key, {}).items():
         ws[coordinate] = formula
+    if layout_key == "laxmi_final":
+        remarks = _laxmi_source_remarks(profile)
+        for row in range(115, 126):
+            ws[f"B{row}"] = remarks[row - 115] if row - 115 < len(remarks) else ""
+        engineer = _first(profile, "visit_engineer", "visit_by")
+        ws["A131"] = (
+            f"1) The property was inspected by our Engineer ({engineer})."
+            if engineer else
+            ""
+        )
+
+
+def _laxmi_source_remarks(profile):
+    """Build only evidence-backed Laxmi remarks; never invent missing facts."""
+    remarks = []
+    property_type = _first(profile, "property_type", "property_usage_as_per_site")
+    occupancy = _first(profile, "occupancy")
+    if property_type or occupancy:
+        remarks.append(
+            "The subject property is " + " ".join(
+                str(value) for value in (property_type, occupancy) if value
+            ) + "."
+        )
+    identified = _first(profile, "property_identified_through")
+    if identified:
+        remarks.append(f"Property identified through {identified}.")
+    document_type = _first(profile, "document_type")
+    registration = _first(profile, "registration_number", "title_document_number")
+    owner = _first(profile, "owner_name")
+    if document_type or registration or owner:
+        parts = [str(value) for value in (document_type, registration, owner) if value]
+        remarks.append("Documents reviewed: " + "; ".join(parts) + ".")
+    docs_area = _first(profile, "land_area_as_per_docs")
+    site_area = _first(profile, "land_area_as_per_site")
+    if docs_area or site_area:
+        remarks.append(
+            f"Plot area as per documents is {docs_area or 'not available'}; "
+            f"actual site area is {site_area or 'not available'}."
+        )
+    builtup = _first(profile, "builtup_area_as_per_site", "builtup_area")
+    structure = _first(profile, "structure_type")
+    if builtup or structure:
+        remarks.append(
+            f"Existing built-up area is {builtup or 'not available'}; "
+            f"structure is {structure or 'not available'}."
+        )
+    observations = _first(profile, "site_observations")
+    if observations:
+        remarks.append(str(observations))
+    meter = _first(profile, "electricity_meter_status")
+    if meter:
+        remarks.append(f"Electricity meter / bill status: {meter}.")
+    road = _first(profile, "road_width", "road_access")
+    if road:
+        remarks.append(f"Road access reported at site: {road}.")
+    return remarks[:11]
 
 
 NUMBERED_PROPERTY_PHOTO_CATEGORIES = {
@@ -578,7 +680,7 @@ def _effective_photo_category(asset):
     filename = Path(asset.get("filename") or "").stem.casefold()
     if any(token in filename for token in ("google_map", "google map")):
         return "Google Map"
-    if any(token in filename for token in ("mp_kisan", "mp kishan", "mp_kishan")):
+    if any(token in filename for token in ("mp_kisan", "mp kishan", "mp_kishan", "kishan", "kisan")):
         return "MP Kisan"
     if category == "Other Site Photo":
         match = re.search(r"property[_ -]*photos?[_ -]*(\d+)$", filename)
@@ -688,14 +790,37 @@ EXCEL_PHOTO_LAYOUTS = {
             ("A207", 360, 260, "Property Selfie"),
             ("G207", 360, 260, ("Electricity Meter", "Electricity Bill")),
             ("A210", 720, 360, "Site Sketch"),
-            ("A236", 720, 360, "Location Map"),
+            ("A236", 720, 360, ("Location Map", "Google Map")),
         ],
     },
+}
+
+EXCEL_PHOTO_LAYOUTS["laxmi_final"] = {
+    "sheet": "MOTA RAM", "remove_after_row": 1,
+    "slots": [
+        ("A144", "C165", 600, 500, ("Property Document", "Guideline Rate", "Land Record")),
+        ("D144", "F165", 600, 500, ("Property Document", "Guideline Rate", "Land Record")),
+        ("G144", "I165", 600, 500, ("Property Document", "Guideline Rate", "Land Record")),
+        ("J144", "K165", 500, 500, ("Guideline Rate", "Land Record", "Property Document")),
+        ("A168", "C186", 500, 450, "Front Elevation"),
+        ("D168", "F186", 500, 450, "Front Side View"),
+        ("G168", "I186", 500, 450, "Approach Road"),
+        ("J168", "K186", 500, 450, "Distant Property View"),
+        ("A188", "C211", 500, 520, "Internal Room"),
+        ("D188", "F211", 500, 520, "Internal Room"),
+        ("G188", "I211", 500, 520, "Kitchen"),
+        ("J188", "K211", 500, 520, "Property Selfie"),
+        ("A216", "F240", 750, 600, "Site Sketch"),
+        ("G216", "K240", 600, 600, "MP Kisan"),
+        ("A270", "I328", 1200, 720, ("Google Map", "Location Map")),
+    ],
 }
 
 
 def _layout_key(template_name, bank_name=""):
     text = f"{template_name} {bank_name}".lower()
+    if "laxmi" in text and ("final reference" in text or "valuer approved" in text):
+        return "laxmi_final"
     if "dcb" in text:
         return "dcb"
     if "sbfc" in text:
@@ -719,11 +844,16 @@ def insert_excel_photos(workbook, photo_assets, template_name="", bank_name=""):
     ]
     photos = _ordered_photos(photo_assets)
     slots = layout["slots"]
-    if slots and len(slots[0]) == 4:
+    if slots and len(slots[0]) in (4, 5):
         groups = _photo_groups(photos)
         selected = []
         used = set()
-        for anchor, width, height, requested in slots:
+        for slot in slots:
+            if len(slot) == 5:
+                anchor, end_anchor, width, height, requested = slot
+            else:
+                anchor, width, height, requested = slot
+                end_anchor = None
             categories = requested if isinstance(requested, tuple) else (requested,)
             asset = next(
                 (
@@ -736,6 +866,7 @@ def insert_excel_photos(workbook, photo_assets, template_name="", bank_name=""):
             )
             if asset is None and requested not in (
                 "Property Document", "Site Sketch", "Location Map", "Google Map", "MP Kisan",
+                "Electricity Meter", "Electricity Bill",
             ):
                 asset = next(
                     (
@@ -752,13 +883,22 @@ def insert_excel_photos(workbook, photo_assets, template_name="", bank_name=""):
             if asset is None:
                 continue
             used.add(id(asset))
-            selected.append((asset, (anchor, width, height)))
+            selected.append((asset, (anchor, end_anchor, width, height)))
     else:
-        selected = list(zip(photos, slots))
-    for asset, (anchor, width, height) in selected:
+        selected = [(asset, (slot[0], None, slot[1], slot[2])) for asset, slot in zip(photos, slots)]
+    for asset, (anchor, end_anchor, width, height) in selected:
         try:
             image = _excel_image(asset, width, height)
-            image.anchor = anchor
+            if end_anchor:
+                start_row, start_col = coordinate_to_tuple(anchor)
+                end_row, end_col = coordinate_to_tuple(end_anchor)
+                image.anchor = TwoCellAnchor(
+                    _from=AnchorMarker(col=start_col - 1, row=start_row - 1),
+                    to=AnchorMarker(col=end_col, row=end_row),
+                    editAs="twoCell",
+                )
+            else:
+                image.anchor = anchor
             ws.add_image(image)
         except Exception:
             continue

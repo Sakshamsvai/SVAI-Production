@@ -1,15 +1,30 @@
 {% extends "base.html" %}
+{% block page_heading %}{{ 'MIS' if mis_only else 'Dashboard' }}{% endblock %}
 {% block content %}
-<section class="stats">
-  <a class="stat stat-link" href="{{ url_for('dashboard', from=stats_from.isoformat(), to=stats_to.isoformat()) }}#mis-cases"><span>Current Month MIS Cases</span><b>{{ stats.cases }}</b><small>1st date to today · click to open list</small></a>
-  <a class="stat stat-link" href="{{ url_for('dashboard', review='1', from=stats_from.isoformat(), to=stats_to.isoformat()) }}#mis-cases"><span>Needs Details This Month</span><b>{{ stats.review_cases }}</b><small>Click to check incomplete cases</small></a>
-  <a class="stat stat-link" href="{{ url_for('reports_page') }}"><span>Generated Reports</span><b>{{ stats.reports }}</b><small>Open, view case &amp; download</small></a>
+{% if not mis_only %}
+<section class="dashboard-kpis">
+  <a class="kpi-card blue" href="{{ url_for('mis_page') }}"><span class="kpi-icon">▣</span><div><strong>{{ stats.total_cases }}</strong><small>Total Cases</small><span>Current Month MIS Cases: {{ stats.cases }} · 1st date to today</span><i></i></div></a>
+  <a class="kpi-card green" href="{{ url_for('mis_page', review='1', from=stats_from.isoformat(), to=stats_to.isoformat()) }}"><span class="kpi-icon">▤</span><div><strong>{{ stats.pending_valuations }}</strong><small>Pending Valuations</small><span>{{ stats.review_cases }} need details review</span><i></i></div></a>
+  <a class="kpi-card amber" href="{{ url_for('reports_page') }}"><span class="kpi-icon">▧</span><div><strong>{{ stats.reports }}</strong><small>Reports Generated</small><span>Available reports</span><i></i></div></a>
+  <a class="kpi-card violet" href="{{ url_for('billing_page') }}"><span class="kpi-icon">₹</span><div><strong>₹{{ '{:,.0f}'.format(stats.billing_total) }}</strong><small>Billing This Month</small><span>{{ stats.bills }} saved bill(s)</span><i></i></div></a>
 </section>
 
-<section class="card">
+<section class="reference-dashboard-grid">
+  <article class="card dashboard-panel compact-recent"><div class="panel-heading"><h2>Recent Cases</h2><a href="{{ url_for('mis_page') }}">View All →</a></div><div class="table-wrap"><table><thead><tr><th>Case ID</th><th>Applicant</th><th>Bank</th><th>Status</th><th>Updated On</th></tr></thead><tbody>{% for case in recent_cases %}{% set updated = case.email_received_at or case.created_at %}<tr><td class="mono">{{ case.application_number or ('CASE-' ~ case.id) }}</td><td><b>{{ case.customer_name or 'Details Pending' }}</b></td><td>{{ case.bank_name or '—' }}</td><td><span class="status-tag">{{ case.status or 'New' }}</span></td><td>{{ updated.strftime('%d %b %Y') if updated else '—' }}</td></tr>{% else %}<tr><td colspan="5" class="empty">No recent cases.</td></tr>{% endfor %}</tbody></table></div></article>
+  <article class="card dashboard-panel workflow-donut-panel"><div class="panel-heading"><h2>Workflow Overview</h2><span class="period-chip">This Month⌄</span></div><div class="workflow-donut-content"><div class="workflow-donut" style="background:{{ workflow_gradient }}"><div><b>{{ stats.cases + stats.review_cases }}</b><small>Total Cases</small></div></div><div class="workflow-legend">{% for item in workflow %}<div><i style="background:{{ item.color }}"></i><span>{{ item.label }}</span><b>{{ item.count }} ({{ item.percent }}%)</b></div>{% endfor %}</div></div></article>
+</section>
+
+<section class="reference-dashboard-grid dashboard-bottom-grid">
+  <article class="card dashboard-panel"><div class="panel-heading"><h2>Billing Summary</h2><a class="period-chip" href="{{ url_for('billing_page') }}">This Month⌄</a></div><div class="reference-billing-summary"><span class="summary-icon">₹</span><div><b>₹{{ '{:,.0f}'.format(stats.billing_total) }}</b><small>Total Amount</small></div><div><b>{{ stats.bills }}</b><small>Bills Generated</small></div><div><b>{{ stats.pending_bills }}</b><small>Pending Bills</small></div></div></article>
+  <article class="card dashboard-panel"><div class="panel-heading"><h2>Quick Actions</h2></div><div class="reference-quick-actions"><a href="{{ url_for('mis_page') }}"><span>▥</span><b>Open MIS</b></a><a href="{{ url_for('new_case') }}"><span>▣</span><b>New Case</b></a><a href="{{ url_for('billing_setup_page') }}"><span>▤</span><b>Rate Card</b></a><a href="{{ url_for('billing_page') }}#manual-invoice"><span>▧</span><b>Create Bill</b></a></div></article>
+</section>
+{% endif %}
+
+{% if mis_only %}
+<section class="card dashboard-panel mis-control-card" id="mis-tools">
   <div class="section-head">
     <div>
-      <h1>Monthly Valuation MIS</h1>
+      <span class="eyebrow">CASE INTELLIGENCE</span><h1>Monthly Valuation MIS</h1>
       <p>Only valuation and technical cases: Fresh, Subsequent, Part/Tranche, Revisit, NPA, Construction, Purchase and LAP.</p>
     </div>
     <span class="ai-badge {{ 'ready' if ai_enabled else 'off' }}">
@@ -27,26 +42,18 @@
   </form>
 
   <div class="actions toolbar-actions">
-    <form method="post" action="{{ url_for('fetch_all_emails') }}">
-      <input type="hidden" name="from" value="{{ date_from.isoformat() }}">
-      <input type="hidden" name="to" value="{{ date_to.isoformat() }}">
-      <button class="green">Fetch Valuation Emails</button>
-    </form>
     <a class="button secondary" href="{{ url_for('export_mis') }}?from={{ date_from.isoformat() }}&amp;to={{ date_to.isoformat() }}">Download MIS Excel</a>
     <a class="button" href="{{ url_for('make_report') }}">+ Make Report</a>
-    <form method="post" action="{{ url_for('import_mis') }}" enctype="multipart/form-data" class="inline-upload">
-      <label class="button secondary">Import Existing MIS<input type="file" name="mis_file" accept=".xlsx" required hidden></label>
-      <button type="submit">Add / Merge Cases</button>
-    </form>
-    <span class="note">Auto fetch: current day every 1 minute · previous 2 days checked once when app starts · older dates scan only when you select From/To and press Fetch</span>
+    <span class="note">Automatic MIS: today's new mail every 1 minute · if SVAI was off, the last 31 days recover automatically in short background scans · duplicate application cases are merged and incomplete emails stay in Review.</span>
   </div>
 </section>
 
-<section class="card" id="mis-cases">
+<section class="card dashboard-panel recent-cases" id="mis-cases">
   <div class="section-head">
     <div>
-      <h2>{{ date_from.strftime('%d %b %Y') }} – {{ date_to.strftime('%d %b %Y') }}</h2>
-      <p>{{ 'Needs Details queue' if show_review else 'Clean billing MIS' }} · {{ cases|length }} case(s) shown</p>
+      <span class="eyebrow">RECENT CASES</span><h2>{{ date_from.strftime('%d %b %Y') }} – {{ date_to.strftime('%d %b %Y') }}</h2>
+      <p>{{ 'Needs Details queue' if show_review else 'Complete automatic MIS' }} · {{ cases|length }} case(s) shown</p>
+      {% if not show_review %}<p class="note">Rows marked Review are included here so no received case is hidden; complete their details when available.</p>{% endif %}
       {% if show_review %}<p class="note">These emails need checking because customer, application, bank or case details may be incomplete. Open a useful case; remove an unrelated case from MIS.</p>{% endif %}
     </div>
   </div>
@@ -88,16 +95,17 @@
           <td>{{ case.branch_name or '—' }}</td>
           <td class="row-actions">
             <a class="mini-button" href="{{ url_for('case_detail', case_id=case.id) }}">Open</a>
-            {% if show_review %}
-            <form method="post" action="{{ url_for('archive_case', case_id=case.id) }}" onsubmit="return confirm('Yeh case current MIS se hata diya jayega aur Archived me safe rahega. Remove karein?');">
-              <input type="hidden" name="return_to_review" value="1">
+            {% if case.status == 'Email Parsed - Review' %}
+            <form method="post" action="{{ url_for('save_review_case', case_id=case.id) }}">
               <input type="hidden" name="from" value="{{ date_from.isoformat() }}">
               <input type="hidden" name="to" value="{{ date_to.isoformat() }}">
-              <button class="small danger" type="submit">Remove from MIS</button>
+              <button class="small" type="submit">Save</button>
             </form>
-            {% else %}
-            <form method="post" action="{{ url_for('delete_case', case_id=case.id) }}" onsubmit="return confirm('Sirf SVAI MIS se case aur yahan saved files delete hongi. Gmail/Yahoo mail safe rahega. Delete karein?');">
-              <button class="small danger" type="submit">Delete</button>
+            <form method="post" action="{{ url_for('archive_case', case_id=case.id) }}" onsubmit="return confirm('Yeh case current MIS se hatkar Archived me safe rahega. Remove karein?');">
+              <input type="hidden" name="return_to_mis" value="1">
+              <input type="hidden" name="from" value="{{ date_from.isoformat() }}">
+              <input type="hidden" name="to" value="{{ date_to.isoformat() }}">
+              <button class="small danger" type="submit">Remove</button>
             </form>
             {% endif %}
           </td>
@@ -109,7 +117,9 @@
     </table>
   </div>
 </section>
+{% endif %}
 
+{% if not mis_only %}
 <section class="card compact">
   <h3>Change Login Password</h3>
   <form class="form-grid three" method="post" action="{{ url_for('change_password') }}">
@@ -118,6 +128,7 @@
     <button>Change Password</button>
   </form>
 </section>
+{% endif %}
 <script>
   window.setInterval(function () {
     const editing = ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement?.tagName);

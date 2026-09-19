@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Billing · Pro Valuer{% endblock %}
+{% block page_heading %}Billing{% endblock %}
+{% block page_subheading %}Bank-wise bill numbers, branches, dates and amounts.{% endblock %}
+{% block content %}
+<section class="card billing-hero">
+  <div>
+    <h1>Bank-wise Bill Audit / MIS</h1>
+    <p>ZIP upload karein. Bank aur branch ke hisaab se bill number, date aur amount dekhein, phir Excel download karein.</p>
+  </div>
+  <div class="actions">
+    <a class="button green" href="#manual-bill-mis">Upload ZIP Bills</a>
+    <a class="button secondary" href="{{ url_for('billing_make_bill', source='upload') }}">Generate Bill from MIS</a>
+    <a class="button secondary" href="{{ url_for('billing_setup_page') }}">Bill Formats &amp; Rate Cards</a>
+    <a class="button secondary" href="{{ url_for('gst_register') }}">GST Register</a>
+    <a class="button secondary" href="{{ url_for('payment_tracking') }}">Payment Tracking</a>
+  </div>
+</section>
+
+<section class="card manual-bill-import" id="manual-bill-mis">
+  <div class="section-head"><div><span class="eyebrow">BANK-WISE BILL REGISTER</span><h2>Bulk Bills → Month-wise Bank MIS</h2><p>PDF/XLSX bills ya unki ZIP upload karein. Missing bank, branch, date ya amount wali entries ko Review Required mein check karein.</p></div><a class="button green" href="{{ url_for('export_manual_bill_mis', month=month, bank=request.args.get('bank',''), branch=request.args.get('branch',''), bill=request.args.get('bill',''), review=request.args.get('review',''), **{'from':request.args.get('from',''), 'to':request.args.get('to','')}) }}">Export Bank-wise Excel</a></div>
+  <form method="post" action="{{ url_for('import_manual_bill_mis') }}" enctype="multipart/form-data" class="manual-bill-upload">
+    <label>Bill Month<input type="month" name="billing_period" value="{{ month }}" required></label>
+    <label class="grow">Upload ZIP / PDF / XLSX Bills<input type="file" name="bill_files" accept=".zip,.pdf,.xlsx" multiple required></label>
+    <button>Upload &amp; Calculate MIS</button>
+  </form>
+  <form method="get" class="form-grid three"><label>Month<input type="month" name="month" value="{{ month }}" required></label><label>Bank<input name="bank" value="{{ request.args.get('bank','') }}" placeholder="All banks"></label><label>Branch<input name="branch" value="{{ request.args.get('branch','') }}" placeholder="All branches"></label><label>Bill Number<input name="bill" value="{{ request.args.get('bill','') }}"></label><label>Bill Date From<input type="date" name="from" value="{{ request.args.get('from','') }}"></label><label>Bill Date To<input type="date" name="to" value="{{ request.args.get('to','') }}"></label><label>Review<select name="review"><option value="">All bills</option><option value="1" {{ 'selected' if request.args.get('review') == '1' else '' }}>Review Required</option></select></label><button class="secondary">Apply Filters</button></form>
+  <div class="stats manual-bill-kpis">
+    <div class="stat"><span>Manual Bills</span><b>{{ manual_totals.bills }}</b></div>
+    <div class="stat"><span>Without GST</span><b>₹{{ '{:,.2f}'.format(manual_totals.taxable) }}</b></div>
+    <div class="stat"><span>GST</span><b>₹{{ '{:,.2f}'.format(manual_totals.gst) }}</b></div>
+    <div class="stat"><span>Total With GST</span><b>₹{{ '{:,.2f}'.format(manual_totals.gross) }}</b></div>
+    <div class="stat {{ 'review-stat' if manual_totals.review else '' }}"><span>Needs Review</span><b>{{ manual_totals.review }}</b></div>
+  </div>
+  {% for group in manual_groups %}
+  <details class="manual-bank-group" open>
+    <summary><span><b>{{ group.company_name }}</b><small>{{ group.rows|length }} invoice(s)</small></span><span>Without GST ₹{{ '{:,.2f}'.format(group.taxable) }} · GST ₹{{ '{:,.2f}'.format(group.gst) }} · <b>Total ₹{{ '{:,.2f}'.format(group.gross) }}</b></span></summary>
+    <div class="table-wrap"><table class="bank-bill-register"><thead><tr><th>Branch</th><th>Bill Number</th><th>Bill Date</th><th>Amount</th><th>GST</th><th>Total</th><th>Status / Edit</th></tr></thead><tbody>
+    {% for bill in group.rows %}<tr class="{{ 'needs-review' if bill.needs_review else '' }}">
+      <td>{{ bill.branch_name or 'Review Required' }}</td><td>{{ bill.display_invoice_number or 'Review Required' }}</td><td>{{ bill.invoice_date.strftime('%d-%m-%Y') if bill.invoice_date else '—' }}</td>
+      <td>{{ '{:,.2f}'.format(bill.taxable_value) if bill.taxable_value else '—' }}</td><td>{{ '{:,.2f}'.format(bill.gst_amount) }}</td><td>{{ '{:,.2f}'.format(bill.gross_amount) if bill.gross_amount else '—' }}</td>
+      <td><span class="pill">{{ 'Review Required' if bill.needs_review else 'Checked' }}</span><button type="button" class="small secondary" onclick="document.getElementById('bill-edit-{{ bill.id }}').showModal()">Edit</button>
+      <dialog id="bill-edit-{{ bill.id }}" class="bill-edit-dialog"><h2>Edit Bill</h2><p>{{ bill.source_filename }}</p><form method="post" action="{{ url_for('update_manual_bill_mis', record_id=bill.id) }}" class="form-grid two">
+      <label>Bank<input name="company_name" value="{{ bill.company_name }}" required></label><label>Branch<input name="branch_name" value="{{ bill.branch_name }}"></label><label>Bill Number<input name="invoice_number" value="{{ bill.invoice_number }}" required></label><label>Date<input type="date" name="invoice_date" value="{{ bill.invoice_date.isoformat() if bill.invoice_date else '' }}"></label><label>GSTIN<input name="gst_number" value="{{ bill.gst_number or '' }}"></label>
+      <label>Amount<input type="number" min="0" step=".01" name="taxable_value" value="{{ bill.taxable_value }}"></label><label>GST<input type="number" min="0" step=".01" name="gst_amount" value="{{ bill.gst_amount }}"></label><label>Total<input type="number" min="0" step=".01" name="gross_amount" value="{{ bill.gross_amount }}"></label>
+      <label>Status<select name="review_required"><option value="0" {% if not bill.needs_review %}selected{% endif %}>Checked</option><option value="1" {% if bill.needs_review %}selected{% endif %}>Review Required</option></select></label><div class="actions"><button>Save</button><button type="button" class="secondary" onclick="this.closest('dialog').close()">Close</button></div></form></dialog></td>
+    </tr>{% endfor %}
+    </tbody></table></div>
+  </details>
+  {% else %}<div class="empty manual-bill-empty">{{ month }} ke manual bills abhi upload nahi hue.</div>{% endfor %}
+</section>
+
+<section class="card workflow-step">
+  <div class="section-head"><div><h2>Bill banane ka sahi flow</h2><p>Manual MIS hi billing source rahegi; app live MIS ko automatically bill mein mix nahi karega.</p></div></div>
+  <div class="workflow-grid">
+    <div class="card compact"><div class="step-title"><span>1</span><div><h2>Checked MIS upload</h2><p>Excel MIS mein Application No., Customer Name, Bank/Company, Case Type aur KM rakhein.</p></div></div></div>
+    <div class="card compact"><div class="step-title"><span>2</span><div><h2>Company / Bank select</h2><p>Us company ka saved bill format aur approved rate card select karein.</p></div></div></div>
+    <div class="card compact"><div class="step-title"><span>3</span><div><h2>Company-wise Excel bill</h2><p>Sirf selected company/bank aur branch ke MIS cases se original Excel format mein bill download hoga.</p></div></div></div>
+  </div>
+</section>
+
+<section class="stats">
+  <div class="stat"><span>Bills This Month</span><b>{{ kpis.bills }}</b></div>
+  <div class="stat"><span>Outstanding Amount</span><b>₹{{ '%.2f'|format(kpis.outstanding) }}</b></div>
+  <div class="stat"><span>Paid This Month</span><b>₹{{ '%.2f'|format(kpis.paid) }}</b></div>
+  <div class="stat"><span>GST Liability</span><b>₹{{ '%.2f'|format(kpis.gst) }}</b></div>
+  <div class="stat"><span>Revised / Cancelled</span><b>{{ kpis.revised_cancelled }}</b></div>
+</section>
+
+<details class="card advanced-workflow" id="manual-invoice">
+  <summary>Manual Invoice Register entry (sirf agar MIS-based Excel bill nahi banana hai)</summary>
+  <form method="post" action="{{ url_for('create_invoice') }}" class="form-grid three">
+    <label>Company / Client<input name="company_name" required></label><label>Billing Period<input type="month" name="billing_period" value="{{ month }}" required></label><label>Invoice Number<input name="invoice_number" required></label><label>Invoice Date<input type="date" name="invoice_date" required></label><label>Taxable Value ₹<input type="number" step="0.01" min="0" name="taxable_value" required></label><label>GST Rate %<input type="number" step="0.01" min="0" name="gst_rate" value="18"></label><label>Tax Type<select name="tax_type"><option value="CGST_SGST">CGST + SGST</option><option value="IGST">IGST</option></select></label><label>Expected TDS ₹<input type="number" step="0.01" min="0" name="tds_expected" value="0"></label><label>Status<select name="status"><option>Draft</option><option>Issued</option><option>On Hold</option></select></label><div class="full"><button class="green">Save Manual Invoice</button></div>
+  </form>
+</details>
+
+<section class="card"><h2>Bill Register</h2><div class="table-wrap"><table><thead><tr><th>Company</th><th>Invoice</th><th>Date</th><th>Taxable</th><th>GST</th><th>Gross</th><th>Bill Status</th><th>Payment</th><th>Outstanding</th><th>Actions</th></tr></thead><tbody>
+{% for i in invoices %}<tr><td><a href="{{ url_for('company_billing_history', company_name=i.company_name) }}">{{ i.company_name }}</a></td><td>{{ i.invoice_number }}</td><td>{{ i.invoice_date.strftime('%d-%m-%Y') }}</td><td>₹{{ '%.2f'|format(i.taxable_value) }}</td><td>₹{{ '%.2f'|format(i.cgst+i.sgst+i.igst) }}</td><td>₹{{ '%.2f'|format(i.gross_amount) }}</td><td><span class="pill">{{ i.status }}</span>{% if i.gst_filed %}<small>GST Filed {{ i.gst_filed_period }}</small>{% endif %}</td><td>{{ payment_status(i) }}</td><td>₹{{ '%.2f'|format([i.gross_amount-paid_amount(i.id),0]|max) }}</td><td>{% if i.status not in ['Cancelled','Revised'] %}<details><summary>Revise</summary><form method="post" action="{{ url_for('revise_invoice', invoice_id=i.id) }}"><input name="invoice_number" placeholder="Revised invoice no" required><input type="date" name="invoice_date" required><input type="number" step=".01" name="taxable_value" value="{{ i.taxable_value }}" required><input name="reason" placeholder="Reason" required><button class="small">Save revision</button></form></details><form method="post" action="{{ url_for('cancel_invoice', invoice_id=i.id) }}"><input name="reason" placeholder="Cancellation reason" required><button class="small danger">Cancel</button></form>{% endif %}</td></tr>{% else %}<tr><td colspan="10" class="empty">No bills saved yet.</td></tr>{% endfor %}</tbody></table></div></section>
+{% endblock %}

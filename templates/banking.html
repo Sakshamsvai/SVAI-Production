@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}Banking · SVAI{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-head">
+    <div>
+      <h1>Banking · Incoming Payment Analysis</h1>
+      <p>PDF ya Excel statement upload karein. Sirf credit payments bank/company ke hisab se ek saath dikhengi.</p>
+    </div>
+    <a class="button green" href="{{ url_for('bill_audit_page') }}">Open Bill Audit</a>
+  </div>
+  <form method="post" enctype="multipart/form-data" class="banking-upload">
+    <label class="grow">Bank Statement (PDF / Excel)
+      <input type="file" name="statement_file" accept=".pdf,.xlsx" required>
+    </label>
+    <button type="submit">Upload &amp; Analyse</button>
+  </form>
+  <p class="note">Privacy: statement parse hone ke baad original PDF/Excel file app mein save nahi hoti. Sirf incoming transaction details local database mein rehti hain.</p>
+</section>
+
+{% if statements %}
+<section class="card compact">
+  <div class="section-head">
+    <div>
+      <h2>Saved Analyses</h2>
+      <p>{{ statements|length }} statement analysis</p>
+    </div>
+  </div>
+  <div class="statement-chips">
+    {% for statement in statements %}
+      <div class="statement-chip {% if selected_statement == statement.id %}selected{% endif %}">
+        <a href="{{ url_for('banking_page', statement=statement.id) }}">
+          <b>{{ statement.filename }}</b>
+          <span>{{ statement.statement_from.strftime('%d-%m-%Y') if statement.statement_from else '-' }} to {{ statement.statement_to.strftime('%d-%m-%Y') if statement.statement_to else '-' }}</span>
+          <span>{{ statement.transaction_count }} credits · ₹{{ '{:,.2f}'.format(statement.total_credit) }}</span>
+        </a>
+        <form method="post" action="{{ url_for('banking_delete_statement', statement_id=statement.id) }}" onsubmit="return confirm('Is statement ka saved analysis remove karein?');">
+          <button type="submit" class="small danger">Remove</button>
+        </form>
+      </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="card">
+  <form method="get" class="banking-filter">
+    <label>Statement
+      <select name="statement">
+        <option value="">All uploaded statements</option>
+        {% for statement in statements %}
+          <option value="{{ statement.id }}" {% if selected_statement == statement.id %}selected{% endif %}>{{ statement.filename }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Month
+      <input type="month" name="month" value="{{ selected_month }}">
+    </label>
+    <label>Payer Bank / Company
+      <select name="payer">
+        <option value="">All payer banks</option>
+        {% for name in payer_names %}
+          <option value="{{ name }}" {% if selected_payer == name %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">View</button>
+    <a class="button secondary" href="{{ url_for('banking_page') }}">Clear</a>
+  </form>
+</section>
+
+{% if reconciliation %}
+<section class="card">
+  <div class="section-head">
+    <div>
+      <h2>{{ reconciliation.month }} Statement Reconciliation</h2>
+      <p>Comparison exact calendar month (year + month) par hi hota hai.</p>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table class="banking-table">
+      <thead><tr><th>Statement</th><th>Date coverage</th><th>Credits in selected month</th><th>Total credit</th></tr></thead>
+      <tbody>
+      {% for item in reconciliation.summaries %}
+        <tr>
+          <td>{{ item.statement.filename }}</td>
+          <td>{{ item.statement.statement_from.strftime('%d-%m-%Y') }} to {{ item.statement.statement_to.strftime('%d-%m-%Y') }}</td>
+          <td>{{ item.count }}</td>
+          <td class="amount">₹{{ '{:,.2f}'.format(item.total) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if reconciliation.comparable %}
+    <p class="note">Exact transaction match: {{ reconciliation.matched }} · First statement only: {{ reconciliation.left_only }} · Second statement only: {{ reconciliation.right_only }}</p>
+  {% else %}
+    <p class="note"><b>Not comparable:</b> selected {{ reconciliation.month }} में exactly two statements में transactions नहीं हैं. अलग year के July को आपस में match नहीं किया गया.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="stats">
+  <div class="stat"><span>Incoming Credit Entries</span><b>{{ transaction_count }}</b></div>
+  <div class="stat"><span>Total Received</span><b>₹{{ '{:,.2f}'.format(overall_total) }}</b></div>
+  <div class="stat"><span>Payer Banks / Companies</span><b>{{ groups|length }}</b></div>
+</section>
+
+{% if groups %}
+<div class="banking-actions" style="gap:10px;flex-wrap:wrap">
+  <a class="button green" href="{{ url_for('banking_export', statement=selected_statement or '', month=selected_month, payer=selected_payer, layout='single') }}">Download All Banks - One Sheet</a>
+  <a class="button secondary" href="{{ url_for('banking_export', statement=selected_statement or '', month=selected_month, payer=selected_payer) }}">Download Separate Bank Sheets</a>
+</div>
+{% endif %}
+
+{% for bank_group in bank_history_groups %}
+<details class="banking-bank-group {% if bank_group.payer_name == 'Unknown / Review' %}review-ledger{% endif %}" {% if bank_group.open %}open{% endif %}>
+  <summary>
+    <div><span class="eyebrow">BANK / COMPANY PAYMENT HISTORY</span><b>{{ bank_group.payer_name }}</b><small>{{ bank_group.transactions|length }} incoming credit(s) · {{ bank_group.months|length }} month(s)</small></div>
+    <div class="bank-total">Received Till Date <b>₹{{ '{:,.2f}'.format(bank_group.total) }}</b></div>
+  </summary>
+  <div class="bank-history-content">
+    <details class="banking-date-history" open>
+      <summary>All payments date-wise <span>{{ bank_group.transactions|length }} entries</span></summary>
+      <div class="table-wrap">
+        <table class="banking-table">
+          <thead><tr><th>Date</th><th>Amount</th><th>UTR / NEFT / Reference</th><th>Statement Narration</th></tr></thead>
+          <tbody>{% for transaction in bank_group.transactions %}<tr><td>{{ transaction.transaction_date.strftime('%d-%m-%Y') }}</td><td class="amount">₹{{ '{:,.2f}'.format(transaction.amount) }}</td><td class="mono">{{ transaction.reference_number or '-' }}</td><td>{{ transaction.narration }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+    </details>
+    <div class="bank-month-heading">Month-wise received payments</div>
+  {% for month_group in bank_group.months %}
+  <details class="banking-month-group" {% if month_group.open %}open{% endif %}>
+    <summary>
+      <div><span class="eyebrow">PAYMENT MONTH</span><b>{{ month_group.label }}</b><small>{{ month_group.transactions|length }} incoming credit(s)</small></div>
+      <div class="bank-total">Month Total <b>₹{{ '{:,.2f}'.format(month_group.total) }}</b></div>
+    </summary>
+    <div class="month-ledgers">
+    <div class="table-wrap">
+      <table class="banking-table">
+        <thead><tr><th>Date</th><th>Amount</th><th>UTR / NEFT / Reference</th><th>Statement Narration</th></tr></thead>
+        <tbody>
+        {% for transaction in month_group.transactions %}
+          <tr>
+            <td>{{ transaction.transaction_date.strftime('%d-%m-%Y') }}</td>
+            <td class="amount">₹{{ '{:,.2f}'.format(transaction.amount) }}</td>
+            <td class="mono">{{ transaction.reference_number or '-' }}</td>
+            <td>{{ transaction.narration }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    </div>
+  </details>
+  {% endfor %}
+  </div>
+</details>
+{% else %}
+<section class="card empty">Statement upload karein ya filter badlein. Bank/company-wise incoming payments yahan dikhengi.</section>
+{% endfor %}
+{% endblock %}
+
+
+

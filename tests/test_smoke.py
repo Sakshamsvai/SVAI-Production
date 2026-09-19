@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import unquote
@@ -14,6 +14,7 @@ from urllib.parse import unquote
 from docx import Document
 from openpyxl import Workbook, load_workbook
 from PIL import Image
+from werkzeug.datastructures import FileStorage
 from werkzeug.security import generate_password_hash
 
 
@@ -45,12 +46,13 @@ from report_service import (  # noqa: E402
 )
 from local_report_worker import app as local_worker_app  # noqa: E402
 from server import (  # noqa: E402
-    BillingTemplate, EmailAccount, FileAsset, SiteEngineer, WhatsAppGroup, User, ValuationCase,
-    StaffPaymentProfile, StaffMonthlyPayment, app, apply_email_details,
+    BankingStatement, BankingTransaction, BankingPaymentHistory, BillingTemplate, BillingRateCard, EmailAccount, FileAsset,
+    SiteEngineer, WhatsAppGroup, User, ValuationCase,
+    StaffPaymentProfile, StaffMonthlyPayment, ManualBillRecord, app, apply_email_details,
     apply_followup_to_existing_case, db, encrypt_password, is_followup_email,
     clean_non_billing_followups,
     filter_billing_ready_cases,
-    existing_case_for_duplicate_assignment, normalized_application_number,
+    existing_case_for_application, existing_case_for_duplicate_assignment, normalized_application_number,
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
     email_fetch_folders, mis_import_rows,
@@ -58,12 +60,316 @@ from server import (  # noqa: E402
     fetch_email_account, fetch_email_account_range, fetch_full_message, fetch_mis_message,
     enrich_missing_address_from_email_document, imap_safe_assignment_folders,
     archived_case_has_assignment_identity, recover_structured_archived_cases,
-    staff_payment_amounts, staff_names_from_workbook,
+    staff_payment_amounts, staff_names_from_workbook, staff_monthly_rows_from_workbook,
+    banking_month_reconciliation, banking_payer_name, banking_reference_number, parse_banking_xlsx,
+    deduplicate_banking_transactions, save_banking_payment_history,
+    bill_audit_matches, bill_audit_upload_rows, bill_audit_workbook,
+    billing_fee_from_rate_card, billing_rate_case_type,
+    parse_manual_bill_content, manual_bill_mis_workbook,
     read_upload_limited,
 )
 
 
 class SvaiSmokeTests(unittest.TestCase):
+    def test_rate_card_uses_km_and_case_type(self):
+        rules = {
+            "Fresh": [[0, 50, 1200], [50.01, 90, 1400], [90.01, None, 1600]],
+            "Subsequent": [[0, 50, 800], [50.01, 90, 1000], [90.01, None, 1200]],
+        }
+        self.assertEqual(billing_rate_case_type("Tranche"), "Subsequent")
+        self.assertEqual(billing_fee_from_rate_card(60, "Purchase", rules), 1400)
+        self.assertEqual(billing_fee_from_rate_card(60, "Revisit", rules), 1000)
+
+    def test_bill_generator_applies_saved_rate_card_by_case_type(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Sr No", "Application No", "Customer Name", "Type of Case", "K M", "Fees"])
+        sheet.append([None, None, None, None, None, None])
+        stream = io.BytesIO()
+        workbook.save(stream)
+        rules = {
+            "Fresh": [[0, 50, 1200], [50.01, 90, 1400], [90.01, None, 1600]],
+            "Subsequent": [[0, 50, 800], [50.01, 90, 1000], [90.01, None, 1200]],
+        }
+        rows = [
+            {"application_number": "APP-1", "customer_name": "Fresh", "case_type": "Purchase", "property_address": "", "distance": 60},
+            {"application_number": "APP-2", "customer_name": "Revisit", "case_type": "Revisit", "property_address": "", "distance": 60},
+        ]
+        content, pending = generate_billing_workbook(stream.getvalue(), rows, [], rules)
+        result = load_workbook(io.BytesIO(content), data_only=True).active
+        self.assertEqual(result.cell(2, 6).value, 1400)
+        self.assertEqual(result.cell(3, 6).value, 1000)
+        self.assertEqual(pending, [])
+
+    def test_billing_setup_page_lists_rate_cards_and_formats(self):
+        self.login()
+        response = self.client.get("/billing/setup")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Bill Setup", response.data)
+        self.assertIn(b"Save New Rate Card", response.data)
+
+    def test_bill_audit_register_reads_net_amount_and_bank(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Bank Name", "Bill No", "Bill Date", "Customer Name", "Net Amount"])
+        sheet.append(["Bajaj Housing Finance", "INV-101", "05-Jul-2026", "Ramesh", 12500])
+        stream = io.BytesIO()
+        workbook.save(stream)
+        upload = FileStorage(stream=io.BytesIO(stream.getvalue()), filename="Bajaj July.xlsx")
+        rows = bill_audit_upload_rows(upload)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["bank_name"], "Bajaj Housing Finance")
+        self.assertEqual(rows[0]["net_amount"], 12500)
+        self.assertEqual(rows[0]["bill_date"], date(2026, 7, 5))
+
+    def test_bill_audit_totals_generated_invoice_fee_lines_into_one_credit(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Application No", "Customer Name", "Fee"])
+        sheet.append(["APP-1", "Ramesh", 5000])
+        sheet.append(["APP-2", "Suresh", 7500])
+        stream = io.BytesIO()
+        workbook.save(stream)
+        upload = FileStorage(stream=io.BytesIO(stream.getvalue()), filename="Bajaj July Invoice.xlsx")
+        rows = bill_audit_upload_rows(upload, "Bajaj Housing Finance")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["net_amount"], 12500)
+        self.assertIn("Invoice total", rows[0]["customer_name"])
+
+    def test_bill_audit_repeated_invoice_headers_choose_net_not_gst(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Sr.", "Inovice no.", "Amount"])
+        sheet.append([1, "OLD-1", 100])
+        sheet.append(["Month", "Invoce no.", "Date", "Base Amount", "GST", "Total Amount", "Net Amount", "Status"])
+        sheet.append(["June", "SA/JUN/25/107", "05-Jul-2025", 63900, 11502, 75402, 69012, "Received"])
+        stream = io.BytesIO()
+        workbook.save(stream)
+        rows = bill_audit_upload_rows(FileStorage(stream=io.BytesIO(stream.getvalue()), filename="audit.xlsx"), "AYE Finance")
+        june = next(row for row in rows if row["bill_number"] == "SA/JUN/25/107")
+        self.assertEqual(june["net_amount"], 69012)
+        self.assertEqual(june["bill_date"], date(2025, 7, 5))
+
+    def test_bill_audit_matches_unique_exact_credit_and_keeps_ambiguity_for_review(self):
+        from types import SimpleNamespace
+        items = [
+            SimpleNamespace(id=1, bank_name="Bajaj Housing Finance", bill_number="INV-101", bill_date=date(2026, 7, 5), net_amount=12500),
+            SimpleNamespace(id=2, bank_name="Bajaj Housing Finance", bill_number="INV-102", bill_date=date(2026, 7, 1), net_amount=9000),
+        ]
+        transactions = [
+            SimpleNamespace(id=11, payer_name="Bajaj Housing Finance", amount=12500, transaction_date=date(2026, 7, 5), reference_number="UTR101", narration="NEFT payment"),
+            SimpleNamespace(id=12, payer_name="Bajaj Housing Finance", amount=9000, transaction_date=date(2026, 7, 6), reference_number="UTR102", narration="NEFT payment"),
+            SimpleNamespace(id=13, payer_name="Bajaj Housing Finance", amount=9000, transaction_date=date(2026, 7, 7), reference_number="UTR103", narration="NEFT payment"),
+        ]
+        matches = bill_audit_matches(items, transactions)
+        by_item_id = {row["item"].id: row for row in matches if row["item"]}
+        self.assertEqual(by_item_id[1]["status"], "Exact matched")
+        self.assertEqual(by_item_id[1]["transaction"].id, 11)
+        self.assertEqual(by_item_id[2]["status"], "Review - multiple exact credits")
+        self.assertEqual(sum(1 for row in matches if row["status"] == "Unmatched credit"), 2)
+
+    def test_bill_audit_never_matches_credit_before_invoice_date(self):
+        from types import SimpleNamespace
+        item = SimpleNamespace(id=1, bank_name="Bajaj Housing Finance", bill_number="INV-101", bill_date=date(2026, 7, 10), net_amount=12500)
+        transaction = SimpleNamespace(id=11, payer_name="Bajaj Housing Finance", amount=12500, transaction_date=date(2026, 7, 5), reference_number="UTR101", narration="NEFT payment")
+        matches = bill_audit_matches([item], [transaction])
+        self.assertEqual(matches[0]["status"], "Review - credit before invoice date")
+        self.assertIsNone(matches[0]["transaction"])
+
+    def test_bill_audit_workbook_contains_full_audit_sheet(self):
+        from types import SimpleNamespace
+        item = SimpleNamespace(bank_name="Bajaj Housing Finance", bill_number="INV-101", bill_date=date(2026, 7, 5), customer_name="Ramesh", net_amount=12500)
+        transaction = SimpleNamespace(transaction_date=date(2026, 7, 5), amount=12500, payer_name="Bajaj Housing Finance", reference_number="UTR101", narration="NEFT payment")
+        batch = SimpleNamespace(filename="bajaj.xlsx", bank_name="Bajaj Housing Finance", total_net_amount=12500)
+        statement = SimpleNamespace(filename="statement.xlsx")
+        content = bill_audit_workbook(batch, statement, [{"item": item, "transaction": transaction, "status": "Exact matched", "remark": "exact"}])
+        workbook = load_workbook(io.BytesIO(content), data_only=True)
+        self.assertEqual(workbook.sheetnames, ["Summary", "Bill Audit"])
+        self.assertEqual(workbook["Bill Audit"].cell(2, 1).value, "Exact matched")
+        self.assertEqual(workbook["Bill Audit"].cell(2, 6).value, 12500)
+
+    def test_bill_audit_page_uploads_and_exports_against_statement(self):
+        self.login()
+        with app.app_context():
+            statement = BankingStatement(
+                filename="bajaj-statement.xlsx", source_format="Excel", statement_from=date(2026, 7, 1),
+                statement_to=date(2026, 7, 31), transaction_count=1, total_credit=12500,
+            )
+            db.session.add(statement)
+            db.session.flush()
+            db.session.add(BankingTransaction(
+                statement_id=statement.id, transaction_date=date(2026, 7, 5), amount=12500,
+                payer_name="Bajaj Housing Finance", reference_number="UTR101", narration="NEFT payment",
+            ))
+            db.session.commit()
+            statement_id = statement.id
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Bank Name", "Bill No", "Bill Date", "Net Amount"])
+        sheet.append(["Bajaj Housing Finance", "INV-101", "05-Jul-2026", 12500])
+        stream = io.BytesIO()
+        workbook.save(stream)
+        response = self.client.post("/banking/bill-audit", data={
+            "_csrf_token": self.csrf(), "bank_name": "", "statement_id": str(statement_id),
+            "bill_file": (io.BytesIO(stream.getvalue()), "bajaj-bill.xlsx"),
+        }, content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            from server import BillAuditBatch
+            batch_id = BillAuditBatch.query.order_by(BillAuditBatch.id.desc()).first().id
+        audit = self.client.get(f"/banking/bill-audit?batch={batch_id}&statement={statement_id}")
+        self.assertEqual(audit.status_code, 200)
+        self.assertIn(b"Exact matched", audit.data)
+        export = self.client.get(f"/banking/bill-audit/export?batch={batch_id}&statement={statement_id}")
+        self.assertEqual(export.status_code, 200)
+        self.assertEqual(export.mimetype, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    def test_banking_page_groups_ledgers_by_month(self):
+        self.login()
+        with app.app_context():
+            statement = BankingStatement(
+                filename="monthly.xlsx", source_format="Excel", statement_from=date(2026, 7, 1),
+                statement_to=date(2026, 8, 31), transaction_count=2, total_credit=3000,
+            )
+            db.session.add(statement)
+            db.session.flush()
+            db.session.add_all([
+                BankingTransaction(statement_id=statement.id, transaction_date=date(2026, 7, 10), amount=1000,
+                                   payer_name="Bajaj Housing Finance", reference_number="JULY-1", narration="July credit"),
+                BankingTransaction(statement_id=statement.id, transaction_date=date(2026, 8, 10), amount=2000,
+                                   payer_name="Bajaj Housing Finance", reference_number="AUG-1", narration="August credit"),
+            ])
+            db.session.commit()
+        page = self.client.get("/banking")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"BANK / COMPANY PAYMENT HISTORY", page.data)
+        self.assertIn(b"All payments date-wise", page.data)
+        self.assertIn(b"Bajaj Housing Finance", page.data)
+        self.assertIn(b"July 2026", page.data)
+        self.assertIn(b"August 2026", page.data)
+        selected = self.client.get("/banking?month=2026-08")
+        self.assertIn(b"August 2026", selected.data)
+        self.assertNotIn(b"July 2026", selected.data)
+
+    def test_bill_audit_shows_all_selected_bank_credits_once_across_statements(self):
+        self.login()
+        with app.app_context():
+            first = BankingStatement(filename="aug.xlsx", source_format="Excel", statement_from=date(2026, 8, 1), statement_to=date(2026, 8, 31), transaction_count=1, total_credit=5000)
+            second = BankingStatement(filename="aug-sep.xlsx", source_format="Excel", statement_from=date(2026, 8, 1), statement_to=date(2026, 9, 30), transaction_count=2, total_credit=12000)
+            db.session.add_all([first, second]); db.session.flush()
+            db.session.add_all([
+                BankingTransaction(statement_id=first.id, transaction_date=date(2026, 8, 20), amount=5000, payer_name="Bajaj Housing Finance", reference_number="REF-5000", narration="NEFT Bajaj August"),
+                BankingTransaction(statement_id=second.id, transaction_date=date(2026, 8, 20), amount=5000, payer_name="Bajaj Housing Finance", reference_number="REF-5000", narration="NEFT Bajaj August"),
+                BankingTransaction(statement_id=second.id, transaction_date=date(2026, 9, 5), amount=7000, payer_name="Bajaj Housing Finance", reference_number="REF-7000", narration="NEFT Bajaj September"),
+            ])
+            from server import BillAuditBatch, BillAuditItem
+            batch = BillAuditBatch(filename="bajaj-bills.xlsx", bank_name="Bajaj Housing Finance", bill_count=1, total_net_amount=5000)
+            db.session.add(batch); db.session.flush()
+            db.session.add(BillAuditItem(batch_id=batch.id, bank_name="Bajaj Housing Finance", bill_number="INV-1", bill_date=date(2026, 8, 20), customer_name="Test", net_amount=5000))
+            db.session.commit()
+            transactions = BankingTransaction.query.filter(
+                BankingTransaction.statement_id.in_([first.id, second.id])
+            ).order_by(BankingTransaction.id).all()
+            self.assertEqual(len(deduplicate_banking_transactions(transactions)), 2)
+            save_banking_payment_history(transactions, "aug.xlsx")
+            db.session.commit()
+            batch_id = batch.id
+        page = self.client.get("/banking/bill-audit", query_string={
+            "history_payer": "Bajaj Housing Finance",
+        })
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"Bank Payment History", page.data)
+        self.assertIn(b"REF-5000", page.data)
+        self.assertIn(b"REF-7000", page.data)
+        self.assertEqual(page.data.count(b"REF-5000"), 1)
+
+    def test_bill_audit_history_survives_statement_removal_and_skips_overlap(self):
+        self.login()
+        with app.app_context():
+            statement = BankingStatement(
+                filename="bajaj-aug.xlsx", source_format="Excel", statement_from=date(2026, 8, 1),
+                statement_to=date(2026, 8, 31), transaction_count=1, total_credit=5000,
+            )
+            db.session.add(statement)
+            db.session.flush()
+            transaction = BankingTransaction(
+                statement_id=statement.id, transaction_date=date(2026, 8, 20), amount=5000,
+                payer_name="Ledger Test Bank", reference_number="UTR-5000", narration="NEFT Ledger Test August",
+            )
+            db.session.add(transaction)
+            db.session.flush()
+            self.assertEqual(save_banking_payment_history([transaction], statement.filename), 1)
+            self.assertEqual(save_banking_payment_history([transaction], "overlap.xlsx"), 0)
+            db.session.commit()
+            statement_id = statement.id
+
+        page = self.client.get("/banking/bill-audit?history_payer=Ledger+Test+Bank")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"UTR-5000", page.data)
+        self.assertIn(b"bajaj-aug.xlsx", page.data)
+        removed = self.client.post(f"/banking/statements/{statement_id}/delete", data={"_csrf_token": self.csrf()})
+        self.assertEqual(removed.status_code, 302)
+        with app.app_context():
+            self.assertEqual(BankingTransaction.query.filter_by(statement_id=statement_id).count(), 0)
+            self.assertEqual(BankingPaymentHistory.query.filter_by(payer_name="Ledger Test Bank").count(), 1)
+        page = self.client.get("/banking/bill-audit?history_payer=Ledger+Test+Bank")
+        self.assertIn(b"UTR-5000", page.data)
+
+    def test_banking_reconciliation_requires_same_year_and_month(self):
+        from types import SimpleNamespace
+        statements = [
+            SimpleNamespace(id=1, filename="july-2026.xlsx"),
+            SimpleNamespace(id=2, filename="annual-2025-26.pdf"),
+        ]
+        rows = [
+            SimpleNamespace(statement_id=1, transaction_date=date(2026, 7, 1), amount=100,
+                            reference_number="ABC123", narration="NEFT ABC123"),
+            SimpleNamespace(statement_id=2, transaction_date=date(2025, 7, 1), amount=100,
+                            reference_number="ABC123", narration="NEFT ABC123"),
+        ]
+        result = banking_month_reconciliation(statements, rows[:1], "2026-07")
+        self.assertFalse(result["comparable"])
+        self.assertEqual([item["count"] for item in result["summaries"]], [1, 0])
+
+    def test_banking_reconciliation_matches_exact_month_transactions(self):
+        from types import SimpleNamespace
+        statements = [SimpleNamespace(id=1), SimpleNamespace(id=2)]
+        rows = [
+            SimpleNamespace(statement_id=1, transaction_date=date(2026, 7, 5), amount=250,
+                            reference_number="REF-001", narration="NEFT REF-001"),
+            SimpleNamespace(statement_id=2, transaction_date=date(2026, 7, 5), amount=250,
+                            reference_number="REF001", narration="NEFT REF001"),
+        ]
+        result = banking_month_reconciliation(statements, rows, "2026-07")
+        self.assertTrue(result["comparable"])
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["left_only"], 0)
+        self.assertEqual(result["right_only"], 0)
+
+    def test_banking_excel_groups_credits_and_keeps_reference_as_text(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Statement"])
+        sheet.append(["Transaction Date", "Value Date", "Particulars", "Debit", "Credit", "Balance"])
+        sheet.append([
+            "01-Jul-2026", "01-Jul-2026",
+            "NEFT/HDFCH00123456789/BAJAJ HOUSING FINANCE LIMITED/HDFC0000240",
+            None, 12500, 20000,
+        ])
+        sheet.append(["02-Jul-2026", "02-Jul-2026", "ATM CASH", 1000, None, 19000])
+        stream = io.BytesIO()
+        workbook.save(stream)
+        rows = parse_banking_xlsx(stream.getvalue())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["payer_name"], "Bajaj Housing Finance")
+        self.assertEqual(rows[0]["reference_number"], "HDFCH00123456789")
+        self.assertEqual(rows[0]["amount"], 12500)
+
+    def test_banking_unknown_payment_stays_in_review(self):
+        narration = "NEFT/ABCD123456789/UNRECOGNISED PAYER/ABCD0000123"
+        self.assertEqual(banking_payer_name(narration), "Unknown / Review")
+        self.assertEqual(banking_reference_number(narration), "ABCD123456789")
+
     def test_document_summary_remark_uses_owner_type_and_date(self):
         self.assertEqual(
             document_summary_remark({
@@ -356,16 +662,21 @@ class SvaiSmokeTests(unittest.TestCase):
 
     def test_primary_pages_render(self):
         self.login()
-        for path in ["/", "/make-report", "/email-accounts", "/site-engineers", "/templates", "/reports", "/billing", "/settings"]:
+        for path in ["/", "/make-report", "/email-accounts", "/site-engineers", "/templates", "/reports", "/billing", "/conveyance", "/settings"]:
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, path)
-            self.assertIn(b"Dashboard / MIS", response.data)
+            self.assertIn(b'<span>Dashboard</span></a>', response.data)
+            self.assertIn(b'href="/mis"', response.data)
+            self.assertLess(response.data.index(b'class="brand-topbar"'), response.data.index(b'class="app-sidebar"'))
         with app.app_context():
-            case = ValuationCase.query.order_by(ValuationCase.id).first()
+            case = ValuationCase(application_number="PRIMARY-PAGES-RENDER")
+            db.session.add(case)
+            db.session.commit()
             case_id = case.id
         response = self.client.get(f"/cases/{case_id}")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Dashboard / MIS", response.data)
+        self.assertIn(b'<span>Dashboard</span></a>', response.data)
+        self.assertIn(b'href="/mis"', response.data)
         self.assertIn(b"Process All Files", response.data)
         self.assertIn(b"Upload Site Photos", response.data)
 
@@ -419,15 +730,22 @@ class SvaiSmokeTests(unittest.TestCase):
 
     def test_dashboard_announces_one_minute_auto_refresh(self):
         self.login()
-        response = self.client.get("/")
+        dashboard = self.client.get("/")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn(b"Workflow Overview", dashboard.data)
+        self.assertNotIn(b"Monthly Valuation MIS", dashboard.data)
+
+        response = self.client.get("/mis")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Auto fetch: current day every 1 minute", response.data)
-        self.assertIn(b"previous 2 days checked once when app starts", response.data)
-        self.assertIn(b"select From/To and press Fetch", response.data)
-        self.assertIn(b"Current Month MIS Cases", response.data)
-        self.assertIn(b"1st date to today", response.data)
+        self.assertIn(b"Automatic MIS: today's new mail every 1 minute", response.data)
+        self.assertIn(b"today's new mail every 1 minute", response.data)
+        self.assertIn(b"last 31 days recover automatically", response.data)
+        self.assertNotIn(b"Fetch Valuation Emails", response.data)
+        self.assertNotIn(b"Import Existing MIS", response.data)
+        self.assertIn(b"Current Month MIS Cases", dashboard.data)
+        self.assertIn(b"1st date to today", dashboard.data)
         self.assertIn(b"60000", response.data)
-        self.assertIn(b"Generated Reports", response.data)
+        self.assertIn(b"Reports Generated", dashboard.data)
         self.assertNotIn(b"Property Documents", response.data)
         self.assertNotIn(b"K.M.</th>", response.data)
         self.assertNotIn(b">Bills</a>", response.data)
@@ -439,17 +757,17 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn("account, today, today", source)
         self.assertNotIn("month_start", source)
 
-    def test_scheduler_has_bounded_offline_catchup(self):
+    def test_scheduler_recovers_missed_days_in_short_background_batches(self):
         import inspect
 
         server_module = __import__("server")
         catchup = inspect.getsource(server_module.scheduled_email_catchup)
         startup = inspect.getsource(server_module.start_scheduler)
+        self.assertIn("EmailRecoveryState", catchup)
         self.assertIn('AUTO_FETCH_LOOKBACK_DAYS', catchup)
-        self.assertIn('"3"', catchup)
-        self.assertIn("account, start_date, today", catchup)
-        self.assertIn('id="email_catchup_startup"', startup)
-        self.assertNotIn('id="email_catchup_hourly"', startup)
+        self.assertIn("account, recovery_date, recovery_date", catchup)
+        self.assertIn('id="email_catchup"', startup)
+        self.assertIn('minutes=2', startup)
 
     def test_billing_fills_existing_invoice_table_with_km_slab_amount(self):
         workbook = Workbook()
@@ -543,6 +861,140 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn(b"Final Month Payable", page.data)
         self.assertIn(b"Conveyance Test Engineer", page.data)
+
+    def test_monthly_payment_excel_import_uses_saved_rates_and_creates_review_profile(self):
+        with app.app_context():
+            db.session.add(StaffPaymentProfile(
+                name="Saved Engineer", payment_mode="Per Visit",
+                visit_rate=400, petrol_rate=4,
+            ))
+            db.session.commit()
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Engineer Name", "No. Of Visits", "Total KM", "Advance", "Paid/Due", "Remarks"])
+        sheet.append(["Saved Engineer", 5, 100, 200, "Paid", "verified"])
+        sheet.append(["New Engineer", 2, 25, 0, "Due", "rate review"])
+        stream = io.BytesIO()
+        workbook.save(stream)
+        stream.seek(0)
+        stream.filename = "august-payments.xlsx"
+        parsed = staff_monthly_rows_from_workbook(stream)
+        self.assertEqual(parsed[0]["name"], "Saved Engineer")
+        self.login()
+        stream.seek(0)
+        response = self.client.post("/conveyance/monthly/import", data={
+            "_csrf_token": self.csrf(), "month": "2026-08",
+            "payment_file": (stream, stream.filename),
+        }, content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            saved = StaffPaymentProfile.query.filter_by(name="Saved Engineer").one()
+            saved_row = StaffMonthlyPayment.query.filter_by(profile_id=saved.id, month="2026-08").one()
+            self.assertEqual(saved_row.base_amount, 2000)
+            self.assertEqual(saved_row.conveyance_amount, 400)
+            self.assertEqual(saved_row.final_amount, 2200)
+            self.assertEqual(saved_row.status, "Paid")
+            new_profile = StaffPaymentProfile.query.filter_by(name="New Engineer").one()
+            self.assertEqual(new_profile.visit_rate, 0)
+            self.assertEqual(new_profile.petrol_rate, 0)
+        page = self.client.get("/conveyance?month=2026-08")
+        self.assertIn(b"Upload &amp; Prepare 2026-08 MIS", page.data)
+        self.assertIn(b"payment-row-", page.data)
+        self.assertIn(b">Due</option>", page.data)
+
+    def test_manual_bill_bulk_upload_builds_monthly_bank_mis_and_export(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Bank Name", "Test Finance Bank"])
+        sheet.append(["Branch", "Vidisha"])
+        sheet.append(["Invoice No", "PV/2026/101"])
+        sheet.append(["Invoice Date", "15/08/2026"])
+        sheet.append(["GSTIN", "23ABCDE1234F1Z5"])
+        sheet.append(["Taxable Value", 10000])
+        sheet.append(["CGST", 900])
+        sheet.append(["SGST", 900])
+        sheet.append(["Grand Total", 11800])
+        stream = io.BytesIO()
+        workbook.save(stream)
+        content = stream.getvalue()
+        parsed = parse_manual_bill_content("test-invoice.xlsx", content)
+        self.assertEqual(parsed["company_name"], "Test Finance Bank")
+        self.assertEqual(parsed["invoice_number"], "PV/2026/101")
+        self.assertEqual(parsed["gst_number"], "23ABCDE1234F1Z5")
+        self.assertEqual(parsed["taxable_value"], 10000)
+        self.assertEqual(parsed["gst_amount"], 1800)
+        self.assertEqual(parsed["gross_amount"], 11800)
+        self.login()
+        bundle = io.BytesIO()
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.writestr("bank/test-invoice.xlsx", content)
+        zip_content = bundle.getvalue()
+        response = self.client.post("/billing/manual-mis/import", data={
+            "_csrf_token": self.csrf(), "billing_period": "2026-08",
+            "bill_files": (io.BytesIO(zip_content), "bills.zip"),
+        }, content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            row = ManualBillRecord.query.one()
+            self.assertEqual(row.billing_period, "2026-08")
+            self.assertFalse(row.review_required)
+            self.assertEqual(row.branch_name, "Vidisha")
+            row.taxable_value = 12000
+            db.session.commit()
+        self.client.post("/billing/manual-mis/import", data={
+            "_csrf_token": self.csrf(), "billing_period": "2026-08",
+            "bill_files": (io.BytesIO(zip_content), "repeat.zip"),
+        }, content_type="multipart/form-data")
+        with app.app_context():
+            self.assertEqual(ManualBillRecord.query.count(), 1)
+            self.assertEqual(ManualBillRecord.query.one().taxable_value, 12000)
+            ManualBillRecord.query.one().taxable_value = 10000
+            db.session.commit()
+        page = self.client.get("/billing?month=2026-08")
+        self.assertIn(b"Bulk Bills", page.data)
+        self.assertIn(b"Test Finance Bank", page.data)
+        self.assertIn(b"PV/2026/101", page.data)
+        self.assertIn(b"bank-bill-register", page.data)
+        self.assertNotIn(b"PV/2026/101", self.client.get("/billing?month=2026-08&branch=Bhopal").data)
+        self.assertNotIn(b"PV/2026/101", self.client.get("/billing?month=2026-08&from=2026-08-16").data)
+        export = self.client.get("/billing/manual-mis/export?month=2026-08")
+        self.assertEqual(export.status_code, 200)
+        result = load_workbook(io.BytesIO(export.data), data_only=False)["Manual Bill MIS"]
+        self.assertEqual(result["B3"].value, "Test Finance Bank")
+        self.assertEqual(result["F3"].value, 10000)
+        self.assertEqual(result["H3"].value, 11800)
+        bank_sheet = load_workbook(io.BytesIO(export.data))["Test Finance Bank"]
+        self.assertEqual(bank_sheet["B3"].value, "PV/2026/101")
+        self.assertEqual(bank_sheet["G3"].value, "Vidisha")
+        self.assertEqual(bank_sheet["F4"].value, "=SUM(F3:F3)")
+
+    def test_manual_bill_rejects_service_label_and_customer_grouping(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Customer Name", "Some Applicant"])
+        sheet.append(["Invoice No"])
+        sheet.append(["DETAILS OF SERVICE"])
+        sheet.append(["Invoice Date", "15/08/2026"])
+        sheet.append(["CGST", 90])
+        sheet.append(["SGST", 90])
+        sheet.append(["Taxable Value", 1000])
+        sheet.append(["Grand Total", 9000])
+        stream = io.BytesIO()
+        workbook.save(stream)
+        parsed = parse_manual_bill_content("bad.xlsx", stream.getvalue())
+        self.assertEqual(parsed["invoice_number"], "")
+        self.assertEqual(parsed["company_name"], "Review Required")
+        self.assertEqual(parsed["gst_amount"], 180)
+        self.assertTrue(parsed["review_required"])
+
+    def test_manual_bill_zip_rejects_traversal_and_limits(self):
+        from bill_import import bill_inputs
+        bundle = io.BytesIO()
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.writestr("../bad.pdf", b"bad")
+        upload = FileStorage(stream=io.BytesIO(bundle.getvalue()), filename="bad.zip")
+        with self.assertRaises(ValueError):
+            list(bill_inputs([upload], lambda item: item.read()))
 
     def test_billing_page_generates_from_live_mis_and_saved_bank_format(self):
         workbook = Workbook()
@@ -888,8 +1340,6 @@ class SvaiSmokeTests(unittest.TestCase):
             db.session.add(case)
             db.session.commit()
             engineer_id, case_id = engineer.id, case.id
-        dashboard = self.client.get("/")
-        self.assertIn(b'target="_blank"', dashboard.data)
         response = self.client.post(f"/cases/{case_id}/initiate-visit", data={
             "_csrf_token": self.csrf(), "recipient": f"engineer:{engineer_id}",
         })
@@ -1098,6 +1548,28 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn("INBOX", email_fetch_folders(gmail))
         self.assertEqual(email_fetch_folders(yahoo), ["INBOX", "Archive"])
 
+    def test_review_case_can_be_saved_or_removed_from_complete_mis(self):
+        with app.app_context():
+            review = ValuationCase(
+                application_number="REVIEW-SAVE-001", customer_name="Review Customer",
+                bank_name="Test Bank", case_type="Fresh",
+                email_received_at=datetime(2026, 9, 15, 10),
+                status="Email Parsed - Review", archived=False,
+            )
+            db.session.add(review)
+            db.session.commit()
+            review_id = review.id
+        self.login()
+        page = self.client.get("/mis?from=2026-09-15&to=2026-09-15")
+        self.assertIn(b"Save", page.data)
+        self.assertIn(b"Remove", page.data)
+        response = self.client.post(f"/cases/{review_id}/review/save", data={
+            "_csrf_token": self.csrf(), "from": "2026-09-15", "to": "2026-09-15",
+        })
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            self.assertIn("review_saved_at", safe_json(ValuationCase.query.get(review_id).extracted_json))
+
     def test_existing_mis_import_adds_and_merges_without_duplicate_application(self):
         workbook = Workbook()
         sheet = workbook.active
@@ -1133,6 +1605,44 @@ class SvaiSmokeTests(unittest.TestCase):
             matches = ValuationCase.query.filter_by(application_number="IMPORT-2026-001").all()
             self.assertEqual(len(matches), 1)
             self.assertEqual(matches[0].customer_name, "Import Customer")
+
+    def test_official_mis_reconcile_holds_unmatched_email_case_for_review(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "ALL BANK"
+        sheet.append([
+            "SR NO", "Date", "CUSTOMER NAME", "APPLICATION NO", "CONTACT NUMBER",
+            "BANK", "CASE TYPE", "STATUS", "ADDRESS", "VISIT BY", "BRANCH", "K.M",
+        ])
+        sheet.append([
+            1, datetime(2026, 9, 7), "Official Customer", "OFFICIAL-001",
+            "9876543210", "Official Bank", "Fresh", "Report Sent",
+            "Official Address", "Engineer", "Vidisha", 12,
+        ])
+        stream = io.BytesIO()
+        workbook.save(stream)
+        with app.app_context():
+            official = ValuationCase(
+                application_number="OFFICIAL-001", customer_name="Email Customer",
+                bank_name="Official Bank", case_type="Fresh",
+                email_received_at=datetime(2026, 9, 7, 9), status="New - Email",
+            )
+            extra = ValuationCase(
+                application_number="EMAIL-ONLY-002", customer_name="Email Only",
+                bank_name="Other Bank", case_type="Fresh",
+                email_received_at=datetime(2026, 9, 7, 10), status="New - Email",
+            )
+            db.session.add_all([official, extra])
+            db.session.commit()
+        self.login()
+        response = self.client.post("/mis/import", data={
+            "_csrf_token": self.csrf(), "reconcile": "1",
+            "mis_file": (io.BytesIO(stream.getvalue()), "official-mis.xlsx"),
+        }, content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 302)
+        with app.app_context():
+            self.assertEqual(ValuationCase.query.filter_by(application_number="OFFICIAL-001").one().status, "Report Sent")
+            self.assertEqual(ValuationCase.query.filter_by(application_number="EMAIL-ONLY-002").one().status, "Email Parsed - Review")
 
     def test_mis_import_keeps_revisit_separate_and_corrects_reviewed_fields(self):
         workbook = Workbook()
@@ -1218,6 +1728,11 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertIn("BODY.PEEK[TEXT]<0.262144>", mailbox.query)
         self.assertNotIn("RFC822", mailbox.query)
 
+        parsed = __import__("email").message_from_bytes(raw)
+        self.assertEqual(parsed.get("Subject"), "Technical assignment APP-101")
+        self.assertEqual(parsed.get("From"), "bank@example.com")
+        self.assertIn("Test Customer", parsed.get_payload())
+
     def test_full_email_is_available_only_for_missing_address_fallback(self):
         class Mailbox:
             def fetch(self, msg_id, query):
@@ -1228,6 +1743,25 @@ class SvaiSmokeTests(unittest.TestCase):
         raw = fetch_full_message(mailbox, b"2")
         self.assertIn(b"Valuation", raw)
         self.assertEqual(mailbox.query, "(RFC822)")
+
+    def test_bounded_fetch_recovers_header_when_gmail_returns_text_only(self):
+        class GmailMailbox:
+            def __init__(self):
+                self.queries = []
+
+            def fetch(self, msg_id, query):
+                self.queries.append(query)
+                if query == "(BODY.PEEK[HEADER])":
+                    return "OK", [(b"header", b"Subject: Valuation Report - Application No.1218516\r\nFrom: alert@aubank.in\r\n")]
+                return "OK", [(b"text", b"Customer Name: GEDA KIRANA STORE")]
+
+        mailbox = GmailMailbox()
+        raw = fetch_mis_message(mailbox, b"9")
+        parsed = __import__("email").message_from_bytes(raw)
+        self.assertEqual(parsed.get("Subject"), "Valuation Report - Application No.1218516")
+        self.assertEqual(parsed.get("From"), "alert@aubank.in")
+        self.assertIn("GEDA KIRANA STORE", parsed.get_payload())
+        self.assertEqual(mailbox.queries[-1], "(BODY.PEEK[HEADER])")
 
     def test_bounded_fetch_falls_back_for_yahoo_style_imap_error(self):
         class YahooMailbox:
@@ -1265,6 +1799,37 @@ class SvaiSmokeTests(unittest.TestCase):
             "Dear Team,\nPlease share the technical report.\n"
             "On Friday someone wrote:\nCustomer Name: Ramesh Kumar",
         ))
+
+    def test_au_application_no_subject_and_action_text_are_not_lost(self):
+        subject = "Valuation Report - Application No.1218516"
+        body = (
+            "You are hereby assigned the Valuation Report work.\n"
+            "Customer Name: GEDA KIRANA STORE\nMobile No: 7869700651"
+        )
+        extracted = regex_email_extract(subject, body, "alert@aubank.in")
+        self.assertTrue(extracted["is_valuation"])
+        self.assertEqual(extracted["application_number"], "1218516")
+        self.assertEqual(extracted["customer_name"], "GEDA KIRANA STORE")
+        self.assertEqual(extracted["bank_name"], "AU Small Finance Bank")
+
+        table = regex_email_extract(
+            subject,
+            "Collateral Count Date of Valuation Request Received RAPID Number Customer Name Mobile No Complete Address of Property Branch Location DO/Credit Person Name DO/Credit Contact Number Empanelled Valuer Name\n"
+            "1 29-08-2026 1218516 GEDA KIRANA STORE 7869700651 wn 08, 120/6, Part of Survey No.120/6, Ward No.08, Bhander, District Datia 475335 9273 ASHISH SHRIVASTAVA 9584133699 Om Prakash Meena",
+            "alert@aubank.in",
+        )
+        self.assertEqual(table["customer_name"], "GEDA KIRANA STORE")
+        self.assertEqual(table["contact_number"], "7869700651")
+        self.assertIn("District Datia", table["property_address"])
+        self.assertFalse(table.get("case_type"))
+
+        action = regex_email_extract(
+            "Technical initiation - Application No BHO-PRO-002294",
+            "Customer Name: not interested to take\nProperty Address: Ward 5 Bhopal",
+            "assignments@easyhomefinance.com",
+        )
+        self.assertEqual(action.get("customer_name", ""), "")
+        self.assertEqual(action["bank_name"], "Easy Home Finance")
 
     def test_lifc_applicant_source_and_concise_mis_address(self):
         extracted = regex_email_extract(
@@ -1306,6 +1871,21 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(extracted["customer_name"], "Vijay Kushwah")
         self.assertEqual(extracted["bank_name"], "Yes Bank")
 
+    def test_flattened_request_details_table_keeps_business_customer_and_address(self):
+        extracted = regex_email_extract(
+            "Request ID: R260919/88 is assigned",
+            "Dear Saksham Associate, Your request for property valuation is assigned for further process. "
+            "Request Details : R260919/88 Customer Name : M/S.Aerodrive Mobility "
+            "Property Address : Patwari halka no 63 bhagraj ward no 47 tehsil jila sagar-470125 "
+            "Contact Number : 8112260714 Links : Click Here",
+            "yesreapappsupport@yes.bank.in",
+        )
+        self.assertTrue(extracted["is_valuation"])
+        self.assertEqual(extracted["application_number"], "R260919/88")
+        self.assertEqual(extracted["customer_name"], "M/S. Aerodrive Mobility")
+        self.assertEqual(extracted["contact_number"], "8112260714")
+        self.assertIn("Patwari halka no 63", extracted["property_address"])
+
     def test_public_mail_sender_keeps_strong_new_assignment_only(self):
         self.assertTrue(deterministic_email_candidate(
             "Fresh Technical Valuation - Application No LAPGUN100030646",
@@ -1316,6 +1896,16 @@ class SvaiSmokeTests(unittest.TestCase):
             "Technical discussion",
             "Please review whenever convenient.",
             "somebody@yahoo.com",
+        ))
+        self.assertTrue(deterministic_email_candidate(
+            "LAP case update",
+            "Application No: LAPVDS100026755\nCase Type: LAP",
+            "ops@lifc.in",
+        ))
+        self.assertTrue(deterministic_email_candidate(
+            "Case details",
+            "Bank: ABCL\nApplication No: ABCL-2026-001\nCase Type: MBL",
+            "bank.staff@gmail.com",
         ))
         self.assertFalse(is_followup_email(
             "Subsequent visit required - LAP-2026-0091",
@@ -1560,6 +2150,46 @@ class SvaiSmokeTests(unittest.TestCase):
             self.assertFalse(apply_followup_to_existing_case(
                 case, {}, [], "Repeated fetch", None, "<followup@example.com>"
             ))
+
+    def test_same_application_number_merges_even_without_report_request_words(self):
+        subject = "Please check details"
+        body = "LAPSHR100033890 Jamna Prasad"
+        self.assertFalse(is_followup_email(subject, body))
+        with app.app_context():
+            existing = ValuationCase(
+                application_number="LAPSHR100033890", customer_name="Jamna Prasad",
+                case_type="LAP", bank_name="Laxmi India Finance",
+            )
+            db.session.add(existing)
+            db.session.commit()
+            target = existing_case_for_application("LAPSHR100033890", subject=subject)
+            self.assertEqual(target.id, existing.id)
+
+    def test_repeat_fetch_repairs_legacy_missing_headers_and_action_name(self):
+        with app.app_context():
+            case = ValuationCase(
+                application_number="BHO-PRO-002294",
+                customer_name="not interested to take",
+                bank_name="Muthoot Homefin",
+                case_type="LAP",
+                source_email="valuer@gmail.com",
+                source_message_id='valuer@gmail.com:"[Gmail]/All Mail":29835',
+                email_subject="",
+            )
+            db.session.add(case)
+            db.session.commit()
+            changed = apply_followup_to_existing_case(
+                case,
+                {"customer_name": "REAL APPLICANT", "bank_name": "Easy Home Finance"},
+                [],
+                "Technical initiation - REAL APPLICANT - BHO-PRO-002294",
+                datetime(2026, 8, 27, 8, 49),
+                "<recovered-header@easyhomefinance.com>",
+            )
+            self.assertTrue(changed)
+            self.assertEqual(case.customer_name, "REAL APPLICANT")
+            self.assertEqual(case.bank_name, "Easy Home Finance")
+            self.assertIn("REAL APPLICANT", case.email_subject)
 
     def test_later_same_application_mail_preserves_clean_mis_date_and_status(self):
         with app.app_context():
@@ -2057,6 +2687,14 @@ class SvaiSmokeTests(unittest.TestCase):
                 case_type="Subsequent",
                 created_at=__import__("datetime").datetime(2025, 2, 1, 10, 30),
             )
+            review = ValuationCase(
+                application_number="MIS-REVIEW-001",
+                customer_name="Needs details",
+                bank_name="DCB",
+                case_type="Fresh",
+                status="Email Parsed - Review",
+                created_at=__import__("datetime").datetime(2025, 1, 17, 10, 30),
+            )
             archived = ValuationCase(
                 application_number="MIS-ARCHIVED-001",
                 customer_name="Archived duplicate",
@@ -2064,7 +2702,7 @@ class SvaiSmokeTests(unittest.TestCase):
                 archived=True,
                 created_at=__import__("datetime").datetime(2025, 1, 16, 10, 30),
             )
-            db.session.add_all([inside, outside, archived])
+            db.session.add_all([inside, outside, review, archived])
             db.session.commit()
 
         response = self.client.get("/mis/export?from=2025-01-01&to=2025-01-31")
@@ -2081,6 +2719,7 @@ class SvaiSmokeTests(unittest.TestCase):
             sheet.cell(row, 5).value for row in range(2, sheet.max_row + 1)
         ]
         self.assertIn("MIS-IN-001", application_numbers)
+        self.assertIn("MIS-REVIEW-001", application_numbers)
         self.assertNotIn("MIS-OUT-001", application_numbers)
         self.assertNotIn("MIS-ARCHIVED-001", application_numbers)
 
@@ -2194,6 +2833,39 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(defaults["depreciation_percent"], 0)
         self.assertEqual(defaults["conservative_percent"], 70)
         self.assertEqual(defaults["distress_percent"], 80)
+
+    def test_laxmi_final_reference_uses_case_data_and_never_fakes_meter_photo(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "seed_templates" / "Laxmi India Final Reference.xlsx").read_bytes()
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (640, 480), "#7fa06e").save(image_buffer, format="JPEG")
+        output = fill_excel_template(source, {
+            "application_number": "FINAL-001", "customer_name": "Fresh Customer",
+            "property_address_as_per_docs": "Fresh Document Address",
+            "property_address_as_per_site": "Fresh Site Address",
+            "owner_name": "Fresh Owner", "land_area_as_per_docs": "1200 sqft",
+            "land_area_as_per_site": "1100 sqft", "builtup_area_as_per_site": "900 sqft",
+            "structure_type": "RCC", "occupancy": "Self", "visit_engineer": "Engineer A",
+            "site_observations": "Evidence-backed observation.",
+        }, [{
+            "filename": "front.jpg", "category": "Front Elevation",
+            "content": image_buffer.getvalue(),
+        }], "Laxmi India Final Reference.xlsx", "Laxmi India Finance")
+        sheet = load_workbook(io.BytesIO(output), data_only=False)["MOTA RAM"]
+        self.assertEqual(sheet.max_row, 328)
+        self.assertEqual(sheet["D9"].value, "FINAL-001")
+        self.assertEqual(sheet["D10"].value, "Fresh Customer")
+        self.assertEqual(sheet["C15"].value, "Fresh Document Address")
+        self.assertEqual(sheet["C16"].value, "Fresh Site Address")
+        self.assertTrue(any(
+            "Evidence-backed observation" in str(sheet[f"B{row}"].value or "")
+            for row in range(115, 126)
+        ))
+        image_starts = {
+            (image.anchor._from.col + 1, image.anchor._from.row + 1)
+            for image in sheet._images if hasattr(image.anchor, "_from")
+        }
+        self.assertNotIn((7, 213), image_starts)
 
     def test_laxmi_generic_whatsapp_photos_fill_available_slots(self):
         root = Path(__file__).resolve().parents[1]

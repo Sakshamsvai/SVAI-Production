@@ -179,6 +179,21 @@
       </div>
       <label>Floor-wise Usage<textarea name="floor_wise_usage" rows="2">{{ profile.get('floor_wise_usage', '') }}</textarea></label>
       <label>Room Configuration<textarea name="room_configuration" rows="2">{{ profile.get('room_configuration', '') }}</textarea></label>
+      <div class="form-grid two">
+        <label>Distance from Branch<input name="distance_from_branch" value="{{ profile.get('distance_from_branch', '') }}"></label>
+        <label>Nearest Railway Distance<input name="nearest_railway_station_distance" value="{{ profile.get('nearest_railway_station_distance', '') }}"></label>
+        <label>Nearest Bus Stand Distance<input name="nearest_bus_stand_distance" value="{{ profile.get('nearest_bus_stand_distance', '') }}"></label>
+        <label>Nearest Hospital Distance<input name="nearest_hospital_distance" value="{{ profile.get('nearest_hospital_distance', '') }}"></label>
+        <label>Locality Class<input name="locality_class" value="{{ profile.get('locality_class', '') }}" placeholder="Lower / Middle / Upper Middle"></label>
+        <label>Surrounding Development %<input name="surrounding_development_percent" value="{{ profile.get('surrounding_development_percent', '') }}"></label>
+        <label>Approach Road Condition<input name="approach_road_condition" value="{{ profile.get('approach_road_condition', '') }}"></label>
+        <label>Plot Demarcated<input name="plot_demarcated" value="{{ profile.get('plot_demarcated', '') }}"></label>
+        <label>Marketability<input name="marketability" value="{{ profile.get('marketability', '') }}"></label>
+        <label>Relation with Person Met<input name="person_met_relation" value="{{ profile.get('person_met_relation', '') }}"></label>
+        <label>Electricity Meter / Bill Status<input name="electricity_meter_status" value="{{ profile.get('electricity_meter_status', '') }}"></label>
+      </div>
+      <label>Property Identified Through<input name="property_identified_through" value="{{ profile.get('property_identified_through', '') }}"></label>
+      <label>Evidence-backed Site Observations / Remarks<textarea name="site_observations" rows="4">{{ profile.get('site_observations', '') }}</textarea></label>
     </div>
     <button class="full green">Save Verified Document + Actual Site Data</button>
   </form>
@@ -315,3 +330,6 @@ if (new URLSearchParams(window.location.search).get("local_report") === "1") {
 </script>
 {% endif %}
 {% endblock %}
+
+
+

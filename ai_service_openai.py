@@ -76,7 +76,33 @@ BANK_DOMAIN_NAMES = {
     "easyhomefinance": "Easy Home Finance",
     "easyhousing": "Easy Home Finance",
     "fusionfin": "Fusion Finance",
+    # These lender aliases came from the human-reviewed SVAI MIS.  They are
+    # intentionally used as recognition signals as well as sender-domain
+    # labels: lenders and their field teams often forward an assignment from a
+    # generic address, so a valid valuation case must not be discarded merely
+    # because its email format differs from the better-known banks above.
+    "abcl": "Aditya Birla Capital",
+    "adityabirlacapital": "Aditya Birla Capital",
+    "adharloans": "Adhar Housing Finance",
+    "adhars": "Adhar Housing Finance",
+    "ayefinance": "Aye Finance",
+    "dmifinance": "DMI Finance",
+    "hdfc": "HDFC Housing Finance",
+    "icici": "ICICI Home Finance",
+    "kifs": "KIFS Housing Finance",
+    "smfg": "SMFG India Credit",
+    "ugro": "UGRO Capital",
 }
+
+# Case categories accepted in the reviewed SVAI MIS.  When a linked lender
+# mail has a labelled application/case id plus one of these categories, keep
+# it in MIS even if a subject does not use the usual "valuation" wording.
+MANUAL_MIS_CASE_TERMS = (
+    "fresh", "subsequent", "revisit", "re visit", "tranche", "tranch",
+    "lap", "mlap", "mbl", "hl", "hl bt", "construction", "purchase", "resale",
+    "plot purchase", "npa", "desktop", "business banking", "agri banking",
+    "qml", "stbl", "mortgage", "p+c", "r&r",
+)
 
 # A valuation assignment is normally sent by the lender/vendor's own domain.
 # Do not turn the recipient's public mailbox provider into a bank name.
@@ -306,6 +332,7 @@ def _clean_application_number(value):
 
 
 def _clean_person_name(value):
+    business_prefix = bool(re.match(r"(?i)^\s*m\s*/\s*s\.?", str(value or "")))
     value = re.sub(
         r"(?i)^(?:of\s+)?(?:mr|mrs|ms|miss|shri|smt)\.?\s+",
         "",
@@ -326,6 +353,8 @@ def _clean_person_name(value):
         value,
         maxsplit=1,
     )[0].strip(" .,-/")
+    # Operational replies such as "not interested to take" can sit beside a
+    # real applicant in a forwarded table. They are actions, never people.
     if re.search(
         r"(?i)\b(?:not\s+interested|unable\s+to\s+take|cannot\s+take|"
         r"can'?t\s+take|please\s+(?:remove|cancel|reassign)|declin(?:e|ed))\b",
@@ -342,7 +371,13 @@ def _clean_person_name(value):
         return ""
     if "@" in value or any(char.isdigit() for char in value):
         return ""
-    return " ".join(words)
+    cleaned = " ".join(words)
+    if business_prefix:
+        business_value = re.sub(r"(?i)^\s*m\s*/\s*s\.?\s*", "", value)
+        business_words = re.findall(r"[A-Za-z][A-Za-z'.-]*", business_value)
+        if business_words:
+            return f"M/S. {' '.join(business_words)}"
+    return cleaned
 
 
 def _clean_branch(value):
@@ -475,6 +510,8 @@ def deterministic_email_candidate(subject, body, sender=""):
         token in re.sub(r"[^a-z0-9]", "", text)
         for token in BANK_DOMAIN_NAMES
     )
+    reviewed_case_type = any(term in text for term in MANUAL_MIS_CASE_TERMS)
+    known_lender_sender = bool(_bank_from_sender(sender))
     strong_assignment = (
         assignment_hits > 0 or subject_structure or structured_task
         or (identifiers and action_hits > 0)
@@ -483,7 +520,12 @@ def deterministic_email_candidate(subject, body, sender=""):
         or named_property_case
     )
     if not strong_assignment:
-        return False
+        # The reviewed MIS proves that several lenders use terse formats such
+        # as "LAP" or "Tranch" with a labelled application id.  Retain those
+        # cases automatically; incomplete fields go to Review instead of
+        # causing a real valuation assignment to disappear from MIS.
+        if not (identifiers and reviewed_case_type and (known_lender_sender or known_bank_signal)):
+            return False
     # Public mailboxes are sometimes used by bank staff or to forward a real
     # assignment. Keep them only when the message also carries a strong case
     # identity; duplicate application numbers are merged later by the importer.
@@ -505,6 +547,11 @@ def deterministic_email_candidate(subject, body, sender=""):
                 identifiers
                 and operational_case_request
                 and (property_identity or known_bank_signal or case_hits > 0)
+            )
+            or (
+                identifiers
+                and reviewed_case_type
+                and known_bank_signal
             )
         )
     return True
@@ -785,6 +832,28 @@ def regex_email_extract(subject, body, sender):
         r"case|loan|boundar(?:y|ies)|area|land)\b|\n\s*\n|$)",
     ], text, lambda value: _space(value) if _valid_property_address(value) else "")
 
+    # Several lender templates are HTML tables. Depending on the mail client,
+    # their cells arrive as one line rather than separate rows. Read the
+    # labelled values directly so Customer Name, Property Address and Contact
+    # Number are not lost merely because table newlines disappeared.
+    flattened_body = _space(safe_body)
+    request_details = re.search(
+        r"(?is)\bcustomer\s+name\s*[:=\-]\s*(?P<name>.+?)\s+"
+        r"property\s+address\s*[:=\-]\s*(?P<address>.+?)\s+"
+        r"contact\s+number\s*[:=\-]\s*(?P<contact>[6-9]\d{9})(?!\d)",
+        flattened_body,
+    )
+    if request_details:
+        customer_name = customer_name or _clean_person_name(request_details.group("name"))
+        candidate_address = _space(request_details.group("address"))
+        if not property_address and _valid_property_address(candidate_address):
+            property_address = candidate_address
+        contact_number = contact_number or request_details.group("contact")
+
+    # AU assignments arrive as an HTML table whose cell text can be flattened
+    # into one line. Read the data row by its RAPID/application number and the
+    # first mobile delimiter; do not mistake column headings for the customer
+    # or "Part of Survey" in the address for a tranche case.
     au_table = None
     app_for_table = result.get("application_number") or application_number
     if "aubank" in _sender_domain(sender) and app_for_table:

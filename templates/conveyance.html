@@ -1,5 +1,7 @@
 {% extends "base.html" %}
-{% block title %}SVAI Conveyance{% endblock %}
+{% block title %}Conveyance · PRO VALUER{% endblock %}
+{% block page_heading %}Conveyance{% endblock %}
+{% block page_subheading %}Monthly staff payments, visits and expenses.{% endblock %}
 {% block content %}
 <section class="card">
   <div class="section-head"><div><h1>Conveyance / Staff Payment</h1><p>Salary, per-visit payment, KM petrol, advance aur office items ka monthly payable ek jagah.</p></div></div>
@@ -17,8 +19,10 @@
   <div class="stat"><span>Final Month Payable</span><b>₹{{ '%.2f'|format(totals.final) }}</b></div>
 </section>
 
-<section class="card">
-  <h2>1. Staff names import / add</h2>
+<details class="card conveyance-profiles">
+  <summary><span><b>Saved Engineer / Staff Rates</b><small>Names aur salary/visit/petrol rates manage karne ke liye kholen</small></span><strong>Manage Profiles</strong></summary>
+  <div class="profile-manager">
+  <h2>Staff names import / add</h2>
   <p>July wali file upload karne par sirf employee names import honge. Original Excel aur uske amounts change nahi honge.</p>
   <form method="post" action="{{ url_for('import_staff_payment_profiles') }}" enctype="multipart/form-data" class="form-grid three">
     <input type="hidden" name="month" value="{{ month }}">
@@ -37,9 +41,6 @@
     <input type="hidden" name="active" value="1">
     <div class="full"><button>Save New Profile</button></div>
   </form>
-</section>
-
-<section class="card">
   <h2>Saved Staff Rates</h2>
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Category</th><th>Basis</th><th>Salary / Fixed</th><th>Visit Rate</th><th>Petrol / KM</th><th>Active</th><th></th></tr></thead><tbody>
   {% for profile in profiles %}<tr>
@@ -53,19 +54,29 @@
     <td><form id="profile-{{ profile.id }}" method="post" action="{{ url_for('save_staff_payment_profile') }}"><input type="hidden" name="month" value="{{ month }}"><input type="hidden" name="profile_id" value="{{ profile.id }}"><button class="small">Update</button></form></td>
   </tr>{% else %}<tr><td colspan="8" class="empty">Pehle Excel se names import karein ya profile add karein.</td></tr>{% endfor %}
   </tbody></table></div>
-</section>
+  </div>
+</details>
 
 <section class="card">
-  <h2>2. {{ month }} Monthly Calculation</h2>
+  <div class="section-head"><div><h2>{{ month }} Monthly Calculation</h2><p>Payment jis month ka hai wahi month upar select karein, chahe entry aaj karein.</p></div></div>
+  <div class="monthly-import-box">
+    <div><b>Excel se sabhi payments ek saath calculate karein</b><p>Employee/Engineer Name required hai. Visits, KM, Salary/Base, Advance, Adjustment, Paid/Due aur Notes columns milne par automatically use honge. Saved rates ko priority milegi.</p></div>
+    <form method="post" action="{{ url_for('import_staff_monthly_payments') }}" enctype="multipart/form-data">
+      <input type="hidden" name="month" value="{{ month }}">
+      <input type="file" name="payment_file" accept=".xlsx" required>
+      <button class="green">Upload &amp; Prepare {{ month }} MIS</button>
+    </form>
+  </div>
+  <div class="manual-entry-divider"><span>OR ADD / EDIT ONE PERSON</span></div>
   <form method="post" action="{{ url_for('save_staff_monthly_payment') }}" class="form-grid three" id="payment-form">
     <input type="hidden" name="month" value="{{ month }}">
-    <label>Name<select name="profile_id" id="staff-profile" required><option value="">Select staff / office</option>{% for profile in profiles if profile.active %}<option value="{{ profile.id }}" data-mode="{{ profile.payment_mode }}" data-salary="{{ profile.fixed_salary }}" data-visit-rate="{{ profile.visit_rate }}" data-petrol-rate="{{ profile.petrol_rate }}">{{ profile.name }} — {{ profile.payment_mode }}</option>{% endfor %}</select></label>
+    <label>Search Name<input id="staff-search" placeholder="Engineer name type karein" autocomplete="off"><select name="profile_id" id="staff-profile" required><option value="">Select staff / office</option>{% for profile in profiles if profile.active %}<option value="{{ profile.id }}" data-mode="{{ profile.payment_mode }}" data-salary="{{ profile.fixed_salary }}" data-visit-rate="{{ profile.visit_rate }}" data-petrol-rate="{{ profile.petrol_rate }}">{{ profile.name }} — {{ profile.payment_mode }}</option>{% endfor %}</select></label>
     <label>Visits<input type="number" min="0" step="1" name="visits" value="0"></label>
     <label>Total KM<input type="number" min="0" step="0.01" name="km" value="0"></label>
     <label>Base override ₹ <small>(blank = saved rate)</small><input type="number" min="0" step="0.01" name="base_override"></label>
     <label>Advance deduction ₹<input type="number" min="0" step="0.01" name="advance_amount" value="0"></label>
     <label>Adjustment ₹ <small>(minus allowed)</small><input type="number" step="0.01" name="adjustment_amount" value="0"></label>
-    <label>Status<select name="status"><option>Pending</option><option>Paid</option></select></label>
+    <label>Payment Status<select name="status"><option value="Pending">Due</option><option value="Paid">Paid</option></select></label>
     <label class="full">Notes<input name="notes" placeholder="Advance/payment note"></label>
     <div class="result-grid full" id="live-result"><div><span>Base Pay</span><b id="base-preview">₹0.00</b></div><div><span>Petrol</span><b id="petrol-preview">₹0.00</b></div><div><span>Final Payable</span><b id="final-preview">₹0.00</b></div></div>
     <div class="full"><button class="green">Calculate & Save Monthly Row</button></div>
@@ -73,10 +84,22 @@
 </section>
 
 <section class="card">
-  <h2>{{ month }} Payment MIS</h2>
-  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Basis</th><th>Visits</th><th>Base</th><th>KM</th><th>₹/KM</th><th>Petrol</th><th>Adjustment</th><th>Advance</th><th>Final</th><th>Status</th><th>Notes</th></tr></thead><tbody>
-  {% for item in entries %}<tr><td><b>{{ item.profile.name }}</b><small>{{ item.profile.category }}</small></td><td>{{ item.profile.payment_mode }}</td><td>{{ item.visits }}</td><td>₹{{ '%.2f'|format(item.base_amount) }}</td><td>{{ item.km }}</td><td>₹{{ item.profile.petrol_rate }}</td><td>₹{{ '%.2f'|format(item.conveyance_amount) }}</td><td>₹{{ '%.2f'|format(item.adjustment_amount) }}</td><td>₹{{ '%.2f'|format(item.advance_amount) }}</td><td><b>₹{{ '%.2f'|format(item.final_amount) }}</b></td><td><span class="pill">{{ item.status }}</span></td><td>{{ item.notes or '—' }}</td></tr>
-  {% else %}<tr><td colspan="12" class="empty">Is month ki payment rows abhi save nahi hui.</td></tr>{% endfor %}
+  <div class="section-head"><div><h2>{{ month }} Payment MIS</h2><p>Har saved row ko yahin edit karke Paid/Due status badal sakte hain.</p></div><input class="mis-name-search" id="payment-mis-search" placeholder="Name search karein"></div>
+  <div class="table-wrap"><table class="editable-payment-mis"><thead><tr><th>Name</th><th>Basis</th><th>Visits</th><th>Base ₹</th><th>KM</th><th>₹/KM</th><th>Petrol</th><th>Adjustment</th><th>Advance</th><th>Final</th><th>Paid / Due</th><th>Notes</th><th></th></tr></thead><tbody>
+  {% for item in entries %}<tr data-payment-name="{{ item.profile.name|lower }}">
+    <td><b>{{ item.profile.name }}</b><small>{{ item.profile.category }}</small></td><td>{{ item.profile.payment_mode }}</td>
+    <td><input form="payment-row-{{ item.id }}" type="number" min="0" step="1" name="visits" value="{{ item.visits }}"></td>
+    <td><input form="payment-row-{{ item.id }}" type="number" min="0" step="0.01" name="base_override" value="{{ item.base_amount }}"></td>
+    <td><input form="payment-row-{{ item.id }}" type="number" min="0" step="0.01" name="km" value="{{ item.km }}"></td>
+    <td>₹{{ item.profile.petrol_rate }}</td><td>₹{{ '%.2f'|format(item.conveyance_amount) }}</td>
+    <td><input form="payment-row-{{ item.id }}" type="number" step="0.01" name="adjustment_amount" value="{{ item.adjustment_amount }}"></td>
+    <td><input form="payment-row-{{ item.id }}" type="number" min="0" step="0.01" name="advance_amount" value="{{ item.advance_amount }}"></td>
+    <td><b>₹{{ '%.2f'|format(item.final_amount) }}</b></td>
+    <td><select form="payment-row-{{ item.id }}" name="status"><option value="Pending" {% if item.status != 'Paid' %}selected{% endif %}>Due</option><option value="Paid" {% if item.status == 'Paid' %}selected{% endif %}>Paid</option></select></td>
+    <td><input form="payment-row-{{ item.id }}" name="notes" value="{{ item.notes or '' }}"></td>
+    <td><form id="payment-row-{{ item.id }}" method="post" action="{{ url_for('save_staff_monthly_payment') }}"><input type="hidden" name="month" value="{{ month }}"><input type="hidden" name="profile_id" value="{{ item.profile_id }}"><button class="small">Update</button></form></td>
+  </tr>
+  {% else %}<tr><td colspan="13" class="empty">Is month ki payment rows abhi save nahi hui.</td></tr>{% endfor %}
   </tbody></table></div>
 </section>
 
@@ -98,5 +121,18 @@ function calculatePayment() {
   document.getElementById('final-preview').textContent = money(finalAmount);
 }
 paymentForm.addEventListener('input', calculatePayment); calculatePayment();
+const staffSearch = document.getElementById('staff-search');
+const originalStaffOptions = Array.from(profileSelect.options).map(option => option.cloneNode(true));
+staffSearch.addEventListener('input', function () {
+  const query = this.value.trim().toLowerCase();
+  const selected = profileSelect.value;
+  profileSelect.replaceChildren(...originalStaffOptions.filter((option, index) => index === 0 || option.textContent.toLowerCase().includes(query)).map(option => option.cloneNode(true)));
+  if (Array.from(profileSelect.options).some(option => option.value === selected)) profileSelect.value = selected;
+  calculatePayment();
+});
+document.getElementById('payment-mis-search').addEventListener('input', function () {
+  const query = this.value.trim().toLowerCase();
+  document.querySelectorAll('[data-payment-name]').forEach(row => row.hidden = !row.dataset.paymentName.includes(query));
+});
 </script>
 {% endblock %}
