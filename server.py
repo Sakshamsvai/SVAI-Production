@@ -3663,7 +3663,7 @@ def initiate_visit(case_id):
         flash("Pehle saved engineer ya area group select karein.", "error")
         return redirect(request.referrer or url_for("dashboard"))
     message = "\n".join([
-        "New Site Visit - SVAI",
+        "New Site Visit - Saksham Associate",
         f"Customer: {case.customer_name or 'Not available'}",
         f"Customer Mobile: {case.contact_number or 'Not available'}",
         f"Application No: {case.application_number or 'Not available'}",

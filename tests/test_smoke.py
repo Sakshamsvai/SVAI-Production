@@ -1391,6 +1391,7 @@ BANK BRANCH NAME BHOPAL"""
         self.assertEqual(response.status_code, 302)
         location = unquote(response.headers["Location"])
         self.assertIn("https://wa.me/919876543210?text=", location)
+        self.assertIn("New Site Visit - Saksham Associate", location)
         self.assertIn("Visit Customer", location)
         self.assertIn("Village Hasuya, Tehsil Vidisha, Dist- Vidisha", location)
         self.assertNotIn("photos offline phone camera", location)
