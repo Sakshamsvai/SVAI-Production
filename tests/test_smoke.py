@@ -346,7 +346,7 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(result["left_only"], 0)
         self.assertEqual(result["right_only"], 0)
 
-    def test_banking_excel_groups_credits_and_keeps_reference_as_text(self):
+    def test_banking_excel_reads_credit_and_debit_with_reference_as_text(self):
         workbook = Workbook()
         sheet = workbook.active
         sheet.append(["Statement"])
@@ -360,10 +360,14 @@ class SvaiSmokeTests(unittest.TestCase):
         stream = io.BytesIO()
         workbook.save(stream)
         rows = parse_banking_xlsx(stream.getvalue())
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["payer_name"], "Bajaj Housing Finance")
-        self.assertEqual(rows[0]["reference_number"], "HDFCH00123456789")
-        self.assertEqual(rows[0]["amount"], 12500)
+        self.assertEqual(len(rows), 2)
+        credit = next(row for row in rows if row["entry_type"] == "Credit")
+        debit = next(row for row in rows if row["entry_type"] == "Debit")
+        self.assertEqual(credit["payer_name"], "Bajaj Housing Finance")
+        self.assertEqual(credit["reference_number"], "HDFCH00123456789")
+        self.assertEqual(credit["amount"], 12500)
+        self.assertEqual(debit["amount"], 1000)
+        self.assertIn("ATM CASH", debit["payer_name"])
 
     def test_banking_unknown_payment_stays_in_review(self):
         narration = "NEFT/ABCD123456789/UNRECOGNISED PAYER/ABCD0000123"
@@ -986,6 +990,47 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(parsed["company_name"], "Review Required")
         self.assertEqual(parsed["gst_amount"], 180)
         self.assertTrue(parsed["review_required"])
+
+    def test_manual_bill_pdf_formats_use_receiver_bank_and_gst_totals(self):
+        class PdfPage:
+            def __init__(self, text):
+                self.text = text
+
+            def extract_text(self):
+                return self.text
+
+        au_text = """Details of Receiver (Billed to) Details Of Vendor
+Name : M/S AU Small Finance Bank Ltd. Invoice No :- SA/JULY/26/303
+Invoice Date :- 01.08.2026
+Sub Total 3450
+CGST @ 9% 310.5
+SGST @ 9% 310.5
+GRAND TOTAL 4071/-"""
+        bajaj_text = """To.
+Bajaj Housing Finance Limited
+BILL REFERENCE NO. SA/JULY/26/314 BILL MONTH JULY
+DATE OF BILL 1 Aug 2026
+PART A TOTAL AMOUNT INR INR 86,150.00
+PART B IGST 9.00% INR 7,753.50
+PART C CGST 9.00% INR 7,753.50
+TOTAL FEE AMOUNT INR PART (A+D) INR 1,01,657.00
+BANK NAME IDFC First Bank
+BANK BRANCH NAME BHOPAL"""
+        with patch("server.PdfReader", side_effect=[
+            type("Reader", (), {"pages": [PdfPage(au_text)]})(),
+            type("Reader", (), {"pages": [PdfPage(bajaj_text)]})(),
+        ]):
+            au = parse_manual_bill_content("au.pdf", b"invoice")
+            bajaj = parse_manual_bill_content("bajaj.pdf", b"invoice")
+        self.assertEqual(au["company_name"], "M/S AU Small Finance Bank Ltd.")
+        self.assertEqual(au["invoice_number"], "SA/JULY/26/303")
+        self.assertEqual(au["invoice_date"], date(2026, 8, 1))
+        self.assertEqual((au["taxable_value"], au["gst_amount"], au["gross_amount"]), (3450, 621, 4071))
+        self.assertEqual(bajaj["company_name"], "Bajaj Housing Finance Limited")
+        self.assertEqual(bajaj["branch_name"], "BHOPAL")
+        self.assertEqual(bajaj["invoice_number"], "SA/JULY/26/314")
+        self.assertEqual(bajaj["invoice_date"], date(2026, 8, 1))
+        self.assertEqual((bajaj["taxable_value"], bajaj["gst_amount"], bajaj["gross_amount"]), (86150, 15507, 101657))
 
     def test_manual_bill_zip_rejects_traversal_and_limits(self):
         from bill_import import bill_inputs
@@ -1885,6 +1930,20 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(extracted["customer_name"], "M/S. Aerodrive Mobility")
         self.assertEqual(extracted["contact_number"], "8112260714")
         self.assertIn("Patwari halka no 63", extracted["property_address"])
+
+    def test_yes_bank_split_request_details_keeps_clean_customer_and_address(self):
+        extracted = regex_email_extract(
+            "YESReap Assignment R260919/343",
+            "Request Details : R260919/343\nCustomer\nName : M/S. Test Mobility\n"
+            "Property\nAddress : Ward 12, Tehsil Sagar, District Sagar - 470001\n"
+            "Contact\nNumber : 9039680140\nLinks : Click Here",
+            "assignments@yesbank.in",
+        )
+        self.assertEqual(extracted["customer_name"], "M/S. Test Mobility")
+        self.assertEqual(
+            extracted["property_address"], "Ward 12, Tehsil Sagar, District Sagar - 470001"
+        )
+        self.assertEqual(extracted["contact_number"], "9039680140")
 
     def test_public_mail_sender_keeps_strong_new_assignment_only(self):
         self.assertTrue(deterministic_email_candidate(

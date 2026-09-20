@@ -1,6 +1,7 @@
 """Conservative bill label extraction and bounded, in-memory ZIP input."""
 import hashlib
 import io
+import os
 import re
 import zipfile
 from pathlib import PurePosixPath
@@ -43,20 +44,23 @@ def valid_invoice(value):
 
 
 def bill_inputs(uploads, read_upload):
+    max_files = int(os.getenv("MAX_BILL_IMPORT_FILES", "2000"))
+    max_total = int(os.getenv("MAX_BILL_IMPORT_MB", "1024")) * 1024 * 1024
+    max_single = int(os.getenv("MAX_BILL_FILE_MB", "100")) * 1024 * 1024
     count = total = 0
     for upload in uploads:
         content = read_upload(upload)
         if PurePosixPath(upload.filename).suffix.lower() != ".zip":
             count += 1
             total += len(content)
-            if count > 500 or total > 100 * 1024 * 1024:
-                raise ValueError("Maximum 500 bills / 100 MB per import.")
+            if count > max_files or total > max_total or len(content) > max_single:
+                raise ValueError("Billing import size limit exceeded; upload a smaller batch.")
             yield upload.filename, content
             continue
         try:
             with zipfile.ZipFile(io.BytesIO(content)) as archive:
                 members = archive.infolist()
-                if len(members) > 1500:
+                if len(members) > max_files * 3:
                     raise ValueError("ZIP contains too many entries.")
                 for member in members:
                     path = PurePosixPath(member.filename.replace("\\", "/"))
@@ -66,8 +70,8 @@ def bill_inputs(uploads, read_upload):
                         raise ValueError("Unsafe or password-protected ZIP entry.")
                     count += 1
                     total += member.file_size
-                    if count > 500 or total > 100 * 1024 * 1024 or member.file_size > 20 * 1024 * 1024:
-                        raise ValueError("Maximum 500 bills, 20 MB each / 100 MB total.")
+                    if count > max_files or total > max_total or member.file_size > max_single:
+                        raise ValueError("Billing import size limit exceeded; upload a smaller batch.")
                     yield str(path), archive.read(member)
         except (zipfile.BadZipFile, RuntimeError) as exc:
             raise ValueError("ZIP could not be read.") from exc

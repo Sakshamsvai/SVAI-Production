@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+from html import unescape
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
 
@@ -781,7 +782,7 @@ def _first_match(patterns, text, cleaner=_space):
 
 
 def regex_email_extract(subject, body, sender):
-    safe_body = _strip_signature(body)
+    safe_body = re.sub(r"(?is)<[^>]+>", " ", unescape(_strip_signature(body)))
     text = f"{subject}\n{safe_body}"
     result = _subject_fields(subject)
 
@@ -845,10 +846,46 @@ def regex_email_extract(subject, body, sender):
     )
     if request_details:
         customer_name = customer_name or _clean_person_name(request_details.group("name"))
-        candidate_address = _space(request_details.group("address"))
-        if not property_address and _valid_property_address(candidate_address):
+        candidate_address = _space(re.split(
+            r"(?i)\b(?:contact\s+number|links?)\b", request_details.group("address"), maxsplit=1
+        )[0])
+        existing_address_has_next_label = bool(re.search(
+            r"(?i)\b(?:contact\s+number|links?)\b", property_address or ""
+        ))
+        if candidate_address and _valid_property_address(candidate_address) and (
+            not property_address or existing_address_has_next_label
+        ):
             property_address = candidate_address
         contact_number = contact_number or request_details.group("contact")
+
+    # YES Bank's YESReap assignments use the same labels, but their HTML can
+    # insert cells/newlines between every word. Parse each field boundary on
+    # its label rather than relying on one exact flattened table layout.
+    yes_request_details = re.search(
+        r"(?is)\brequest\s+details\b.*?\bcustomer\s+name\s*[:=\-]?\s*"
+        r"(?P<name>.+?)(?=\s*(?:property\s+address|contact\s+number|links?)\b)"
+        r"(?:.*?\bproperty\s+address\s*[:=\-]?\s*"
+        r"(?P<address>.+?)(?=\s*(?:contact\s+number|links?)\b))?"
+        r"(?:.*?\bcontact\s+number\s*[:=\-]?\s*"
+        r"(?P<contact>[6-9]\d{9})(?!\d))?",
+        safe_body,
+    )
+    if yes_request_details:
+        candidate_name = _clean_person_name(yes_request_details.group("name"))
+        if candidate_name and not customer_name:
+            customer_name = candidate_name
+        candidate_address = _space(re.split(
+            r"(?i)\b(?:contact\s+number|links?)\b", yes_request_details.group("address") or "", maxsplit=1
+        )[0])
+        existing_address_needs_cleanup = bool(re.search(
+            r"(?i)<[^>]+>|\b(?:contact\s+number|links?)\b", property_address or ""
+        ))
+        if candidate_address and _valid_property_address(candidate_address) and (
+            not property_address or existing_address_needs_cleanup
+        ):
+            property_address = candidate_address
+        if yes_request_details.group("contact") and not contact_number:
+            contact_number = yes_request_details.group("contact")
 
     # AU assignments arrive as an HTML table whose cell text can be flattened
     # into one line. Read the data row by its RAPID/application number and the

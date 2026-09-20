@@ -37,6 +37,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pypdf import PdfReader
 from sqlalchemy.orm import defer
+from sqlalchemy import inspect, text
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -83,7 +84,10 @@ if database_url.startswith("postgresql+"):
         "pool_pre_ping": True,
         "pool_recycle": 280,
     }
-app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_MB", "20")) * 1024 * 1024
+# Billing archives often contain both PDF and XLSX invoice copies. Keep the
+# application-wide limit practical for genuine month-end batches; deployments
+# may still lower it through MAX_UPLOAD_MB if their infrastructure requires.
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_MB", "512")) * 1024 * 1024
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
@@ -365,6 +369,7 @@ class ManualBillRecord(db.Model):
         db.UniqueConstraint("billing_period", "company_name", "invoice_number", name="uq_manual_bill_period_company_invoice"),
     )
     detail = db.relationship("ManualBillDetail", uselist=False, cascade="all, delete-orphan")
+    payment = db.relationship("ManualBillPayment", uselist=False, cascade="all, delete-orphan")
 
     @property
     def branch_name(self):
@@ -387,12 +392,36 @@ class ManualBillRecord(db.Model):
     def display_invoice_number(self):
         return valid_invoice(self.invoice_number)
 
+    @property
+    def payment_status(self):
+        return self.payment.status if self.payment else "Pending"
+
+    @property
+    def received_amount(self):
+        return self.payment.received_amount if self.payment else 0.0
+
+    @property
+    def settled_amount(self):
+        return self.received_amount + (self.payment.tds_amount if self.payment else 0.0)
+
 
 class ManualBillDetail(db.Model):
     """Additive metadata table keeps existing bill records intact."""
     id = db.Column(db.Integer, primary_key=True)
     record_id = db.Column(db.Integer, db.ForeignKey("manual_bill_record.id"), unique=True, nullable=False)
     branch_name = db.Column(db.String(180), nullable=False, default="")
+
+
+class ManualBillPayment(db.Model):
+    """Payment status for an imported bill, kept separate from its source values."""
+    id = db.Column(db.Integer, primary_key=True)
+    record_id = db.Column(db.Integer, db.ForeignKey("manual_bill_record.id"), unique=True, nullable=False)
+    status = db.Column(db.String(30), nullable=False, default="Pending", index=True)
+    received_amount = db.Column(db.Float, nullable=False, default=0)
+    tds_amount = db.Column(db.Float, nullable=False, default=0)
+    received_date = db.Column(db.Date)
+    utr = db.Column(db.String(180), default="")
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class StaffPaymentProfile(db.Model):
@@ -446,7 +475,7 @@ class BankingStatement(db.Model):
 
 
 class BankingTransaction(db.Model):
-    """An incoming statement payment grouped by the payer company/bank."""
+    """One credit or debit line parsed from a bank statement."""
     id = db.Column(db.Integer, primary_key=True)
     statement_id = db.Column(
         db.Integer, db.ForeignKey("banking_statement.id"), nullable=False, index=True
@@ -454,6 +483,7 @@ class BankingTransaction(db.Model):
     transaction_date = db.Column(db.Date, nullable=False, index=True)
     payer_name = db.Column(db.String(180), nullable=False, default="Unknown / Review", index=True)
     amount = db.Column(db.Float, nullable=False)
+    entry_type = db.Column(db.String(10), nullable=False, default="Credit", index=True)
     reference_number = db.Column(db.String(180), default="")
     narration = db.Column(db.Text, nullable=False)
     statement = db.relationship("BankingStatement")
@@ -981,6 +1011,17 @@ def banking_payer_name(narration):
     return "Unknown / Review"
 
 
+def banking_debit_recipient_name(narration):
+    """Keep a useful human/beneficiary label for outgoing statement lines."""
+    value = re.sub(r"\s+", " ", str(narration or "")).strip()
+    match = re.search(r"\b(?:to|beneficiary|transfer to|paid to)\s*[:/-]?\s*(.+)$", value, re.I)
+    if match:
+        value = match.group(1).strip()
+    value = re.sub(r"\b(?:NEFT|RTGS|IMPS(?:-OPM)?|UPI|IFT)\b[\s/_-]*[A-Z0-9_-]{6,}", "", value, flags=re.I)
+    value = re.sub(r"\s+", " ", value).strip(" -:/")
+    return value[:180] or "Unknown / Review"
+
+
 def banking_reference_number(narration):
     text = re.sub(r"\s+", " ", str(narration or "").strip())
     match = re.search(
@@ -1004,31 +1045,46 @@ def parse_banking_xlsx(content):
             header = None
             for number, values in enumerate(sheet.iter_rows(values_only=True), 1):
                 normalized = [normalized_header(value) for value in values]
-                if "transactiondate" in normalized and "particulars" in normalized and "credit" in normalized:
+                credit_column = next((index for index, value in enumerate(normalized)
+                                      if value in {"credit", "creditamount"}), None)
+                debit_column = next((index for index, value in enumerate(normalized)
+                                     if value in {"debit", "debitamount"}), None)
+                if "transactiondate" in normalized and "particulars" in normalized and (credit_column is not None or debit_column is not None):
                     header = {
                         "row": number,
                         "date": normalized.index("transactiondate"),
                         "narration": normalized.index("particulars"),
-                        "credit": normalized.index("credit"),
+                        "credit": credit_column, "debit": debit_column,
                     }
                     continue
                 if not header or number <= header["row"]:
                     continue
                 tx_date = statement_date(values[header["date"]] if len(values) > header["date"] else None)
-                credit = statement_amount(values[header["credit"]] if len(values) > header["credit"] else None)
                 narration = str(values[header["narration"]] or "").strip() if len(values) > header["narration"] else ""
-                if tx_date and credit and credit > 0 and narration:
+                credit = statement_amount(values[header["credit"]] if header["credit"] is not None and len(values) > header["credit"] else None)
+                debit = statement_amount(values[header["debit"]] if header["debit"] is not None and len(values) > header["debit"] else None)
+                if tx_date and narration and credit and credit > 0:
                     rows.append({
                         "transaction_date": tx_date,
                         "amount": round(credit, 2),
                         "narration": narration,
                         "payer_name": banking_payer_name(narration),
                         "reference_number": banking_reference_number(narration),
+                        "entry_type": "Credit",
+                    })
+                if tx_date and narration and debit and debit > 0:
+                    rows.append({
+                        "transaction_date": tx_date,
+                        "amount": round(debit, 2),
+                        "narration": narration,
+                        "payer_name": banking_debit_recipient_name(narration),
+                        "reference_number": banking_reference_number(narration),
+                        "entry_type": "Debit",
                     })
     finally:
         workbook.close()
     if not rows:
-        raise ValueError("Excel me Transaction Date, Particulars aur Credit wali entries nahi mili.")
+        raise ValueError("Excel me Transaction Date, Particulars aur Credit/Debit wali entries nahi mili.")
     return rows
 
 
@@ -1497,12 +1553,16 @@ def collect_email_attachments(message):
                         inner_name = secure_filename(Path(member.filename).name)
                         if Path(inner_name).suffix.lower() not in DOCUMENT_EXTENSIONS:
                             continue
+                        try:
+                            member_content = bundle.read(member)
+                        except (RuntimeError, ValueError):
+                            continue
                         attachments.append({
                             "filename": inner_name,
-                            "content": bundle.read(member),
+                            "content": member_content,
                             "mime_type": "application/octet-stream",
                         })
-            except (zipfile.BadZipFile, ValueError):
+            except (zipfile.BadZipFile, RuntimeError, ValueError):
                 continue
         else:
             attachments.append({
@@ -2706,6 +2766,18 @@ def read_upload_limited(item):
     if len(content) > max_bytes:
         raise ValueError(
             f"{secure_filename(item.filename)} is too large; keep each file under "
+            f"{max_bytes // (1024 * 1024)} MB."
+        )
+    return content
+
+
+def read_manual_bill_upload(item):
+    """Read large invoice batches without applying the small document-upload cap."""
+    max_bytes = int(os.getenv("MAX_BILL_UPLOAD_MB", "512")) * 1024 * 1024
+    content = item.stream.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise ValueError(
+            f"{secure_filename(item.filename)} is too large; Billing ZIP must be under "
             f"{max_bytes // (1024 * 1024)} MB."
         )
     return content
@@ -4710,7 +4782,7 @@ def export_staff_payments():
 
 
 def banking_filtered_query():
-    query = BankingTransaction.query
+    query = BankingTransaction.query.filter(BankingTransaction.entry_type == "Credit")
     statement_id = request.args.get("statement", type=int)
     month = request.args.get("month", "").strip()
     payer = request.args.get("payer", "").strip()
@@ -4733,7 +4805,9 @@ def banking_transaction_identity(transaction):
     narration_value = transaction.get("narration", "") if isinstance(transaction, dict) else transaction.narration
     reference = re.sub(r"[^A-Z0-9]", "", str(reference_value or "").upper())
     narration = re.sub(r"[^A-Z0-9]", "", str(narration_value or "").upper())
-    return f"REF:{reference}" if reference else f"NARRATION:{narration}"
+    entry_type = transaction.get("entry_type", "Credit") if isinstance(transaction, dict) else transaction.entry_type
+    identity = f"REF:{reference}" if reference else f"NARRATION:{narration}"
+    return f"{entry_type}:{identity}"
 
 
 def banking_payment_history_key(transaction):
@@ -4747,10 +4821,12 @@ def banking_payment_history_key(transaction):
 def save_banking_payment_history(transactions, source_statement_filename):
     added = 0
     for transaction in transactions:
+        value = transaction.get if isinstance(transaction, dict) else lambda name, default=None: getattr(transaction, name, default)
+        if value("entry_type", "Credit") != "Credit":
+            continue
         identity_key = banking_payment_history_key(transaction)
         if BankingPaymentHistory.query.filter_by(identity_key=identity_key).first():
             continue
-        value = transaction.get if isinstance(transaction, dict) else lambda name, default=None: getattr(transaction, name, default)
         db.session.add(BankingPaymentHistory(
             transaction_date=value("transaction_date"),
             payer_name=value("payer_name", "Unknown / Review") or "Unknown / Review",
@@ -4780,6 +4856,7 @@ def is_duplicate_banking_transaction(transaction):
         transaction_date=transaction["transaction_date"],
         amount=round(float(transaction["amount"]), 2),
         payer_name=transaction["payer_name"],
+        entry_type=transaction.get("entry_type", "Credit"),
     ).all()
     identity = banking_transaction_identity(transaction)
     return any(banking_transaction_identity(candidate) == identity for candidate in candidates)
@@ -5065,7 +5142,7 @@ def banking_page():
             parsed, source_format = parse_banking_statement(upload.filename, content)
             parsed_from = min(item["transaction_date"] for item in parsed)
             parsed_to = max(item["transaction_date"] for item in parsed)
-            parsed_total = round(sum(item["amount"] for item in parsed), 2)
+            parsed_total = round(sum(item["amount"] for item in parsed if item.get("entry_type") == "Credit"), 2)
             existing = BankingStatement.query.filter_by(
                 filename=secure_filename(upload.filename) or "bank-statement",
                 statement_from=parsed_from,
@@ -5097,7 +5174,7 @@ def banking_page():
                 statement_from=parsed_from,
                 statement_to=parsed_to,
                 transaction_count=len(unique_transactions),
-                total_credit=round(sum(item["amount"] for item in unique_transactions), 2),
+                total_credit=round(sum(item["amount"] for item in unique_transactions if item.get("entry_type") == "Credit"), 2),
             )
             db.session.add(statement)
             db.session.flush()
@@ -5107,7 +5184,7 @@ def banking_page():
             db.session.commit()
             duplicate_note = f" {duplicate_count} overlapping duplicate entr{'y' if duplicate_count == 1 else 'ies'} skip hui." if duplicate_count else ""
             flash(
-                f"{len(unique_transactions)} new incoming credit entries read ho gayi.{duplicate_note} Bill Audit permanent ledger mein bhi save ho gayi.",
+                f"{sum(item.get('entry_type') == 'Credit' for item in unique_transactions)} credit aur {sum(item.get('entry_type') == 'Debit' for item in unique_transactions)} debit entries read ho gayi.{duplicate_note}",
                 "success",
             )
             return redirect(url_for("banking_page", statement=statement.id))
@@ -5123,6 +5200,7 @@ def banking_page():
     statements = BankingStatement.query.order_by(BankingStatement.created_at.desc()).all()
     payer_names = [
         row[0] for row in db.session.query(BankingTransaction.payer_name)
+        .filter(BankingTransaction.entry_type == "Credit")
         .distinct().order_by(BankingTransaction.payer_name).all()
     ]
     groups = banking_grouped_transactions(transactions)
@@ -5160,6 +5238,28 @@ def banking_page():
     reconciliation = banking_month_reconciliation(
         statements, comparison_transactions, month
     )
+    debit_query = BankingTransaction.query.filter(BankingTransaction.entry_type == "Debit")
+    if selected_statement:
+        debit_query = debit_query.filter(BankingTransaction.statement_id == selected_statement)
+    if re.fullmatch(r"\d{4}-\d{2}", month):
+        debit_query = debit_query.filter(
+            BankingTransaction.transaction_date >= start,
+            BankingTransaction.transaction_date < end,
+        )
+    debit_groups = []
+    for index, group in enumerate(banking_grouped_transactions(deduplicate_banking_transactions(
+            debit_query.order_by(BankingTransaction.transaction_date, BankingTransaction.id).all()))):
+        month_buckets = {}
+        for transaction in group["transactions"]:
+            month_buckets.setdefault(transaction.transaction_date.strftime("%Y-%m"), []).append(transaction)
+        debit_groups.append({
+            **group, "open": bool(month or selected_statement) or index == 0,
+            "months": [{
+                "month": month_key, "label": datetime.strptime(month_key, "%Y-%m").strftime("%B %Y"),
+                "transactions": month_transactions,
+                "total": round(sum(item.amount for item in month_transactions), 2),
+            } for month_key, month_transactions in sorted(month_buckets.items(), reverse=True)],
+        })
     return render_template(
         "banking.html",
         statements=statements,
@@ -5171,6 +5271,8 @@ def banking_page():
         selected_payer=payer,
         overall_total=round(sum(group["total"] for group in groups), 2),
         transaction_count=len(transactions),
+        debit_groups=debit_groups,
+        debit_total=round(sum(group["total"] for group in debit_groups), 2),
         reconciliation=reconciliation,
     )
 
@@ -5407,7 +5509,8 @@ def manual_bill_number(value):
     if value in (None, ""):
         return 0.0
     match = re.search(r"-?[\d,]+(?:\.\d+)?", str(value).replace("₹", ""))
-    return round(float(match.group(0).replace(",", "")), 2) if match else 0.0
+    numeric = match.group(0).replace(",", "") if match else ""
+    return round(float(numeric), 2) if re.search(r"\d", numeric) else 0.0
 
 
 def manual_bill_date(value):
@@ -5416,12 +5519,12 @@ def manual_bill_date(value):
     if isinstance(value, date):
         return value
     text = str(value or "").strip()
-    for pattern in (r"\d{4}-\d{2}-\d{2}", r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", r"\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}"):
+    for pattern in (r"\d{4}-\d{2}-\d{2}", r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", r"\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}"):
         match = re.search(pattern, text)
         if not match:
             continue
         raw = match.group(0)
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y", "%d %b %Y", "%d %B %Y"):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y", "%d-%m-%y", "%d.%m.%y", "%d %b %Y", "%d %B %Y"):
             try:
                 return datetime.strptime(raw, fmt).date()
             except ValueError:
@@ -5433,13 +5536,92 @@ def manual_bill_labeled_value(lines, labels):
     return labeled_value(lines, labels)
 
 
+def manual_bill_receiver(lines):
+    def clean_candidate(value):
+        return re.split(
+            r"\s+(?:invoice|bill)\s*(?:number|no\.?|reference)\b|\s+pan\s+no\b",
+            value, maxsplit=1, flags=re.I,
+        )[0].strip(" :-")
+
+    text = "\n".join(lines)
+    receiver = re.search(
+        r"details\s+of\s+receiver.*?\bname\s*[:=-]\s*([^\n]+)",
+        text, re.I | re.S,
+    )
+    if receiver:
+        candidate = clean_candidate(receiver.group(1))
+        if re.search(r"bank|finance|housing|capital", candidate, re.I):
+            return candidate
+    for index, line in enumerate(lines):
+        if re.fullmatch(r"to\.?", line.strip(), re.I):
+            for candidate in lines[index + 1:index + 4]:
+                if re.search(r"bank|finance|housing|capital", candidate, re.I):
+                    return clean_candidate(candidate)
+    return ""
+
+
+def manual_bill_inline_value(lines, label_pattern):
+    for line in lines:
+        match = re.search(label_pattern, line, re.I)
+        if match:
+            return match.group(1).strip(" :-")
+    return ""
+
+
+def manual_bill_inline_amount(lines, label_pattern):
+    for line in lines:
+        match = re.search(label_pattern, line, re.I)
+        if not match:
+            continue
+        # In PDF tables, labels such as "CGST @ 9% 400.50" often share a
+        # line with the rate.  Only inspect the text after the label, then use
+        # its final numeric value so the rate is never treated as the tax.
+        tail = line[match.end():]
+        amounts = re.findall(r"(?:₹|INR)?\s*([\d,]+(?:\.\d+)?)", tail, re.I)
+        if amounts:
+            return manual_bill_number(amounts[-1])
+    return 0.0
+
+
+def manual_bill_table_totals(lines, gst_amount):
+    """Read unlabeled total columns surrounding CGST/SGST table rows."""
+    tax_rows = [index for index, line in enumerate(lines) if re.search(r"\b(?:cgst|sgst|igst)\b", line, re.I)]
+    for index in tax_rows:
+        before = []
+        after = []
+        for line in lines[max(0, index - 6):index]:
+            if re.search(r"\b(?:cgst|sgst|igst|ifsc|a/c|account)\b|%", line, re.I):
+                continue
+            values = re.findall(r"(?:₹|INR)?\s*([\d,]+(?:\.\d+)?)", line, re.I)
+            if values:
+                before.append(manual_bill_number(values[-1]))
+        for line in lines[index + 1:index + 8]:
+            if re.search(r"\b(?:cgst|sgst|igst|ifsc|a/c|account)\b|%", line, re.I):
+                continue
+            values = re.findall(r"(?:₹|INR)?\s*([\d,]+(?:\.\d+)?)", line, re.I)
+            if values:
+                after.append(manual_bill_number(values[-1]))
+        for taxable in reversed(before):
+            if taxable <= 0:
+                continue
+            for gross in after:
+                if gross > taxable and abs(taxable + gst_amount - gross) <= 0.02:
+                    return taxable, gross
+    return 0.0, 0.0
+
+
 def parse_manual_bill_content(filename, content):
     extension = Path(filename or "").suffix.lower()
     lines = []
     if extension == ".pdf":
         try:
             reader = PdfReader(io.BytesIO(content))
-            lines = [line.strip() for page in reader.pages for line in (page.extract_text() or "").splitlines() if line.strip()]
+            for page in reader.pages:
+                try:
+                    text = page.extract_text(extraction_mode="layout")
+                except TypeError:
+                    text = page.extract_text()
+                lines.extend(line.strip() for line in (text or "").splitlines() if line.strip())
         except Exception as exc:
             raise ValueError(f"{filename}: PDF read nahi hua: {exc}")
     elif extension == ".xlsx":
@@ -5455,32 +5637,62 @@ def parse_manual_bill_content(filename, content):
             raise ValueError(f"{filename}: Excel read nahi hua: {exc}")
     else:
         raise ValueError(f"{filename}: sirf PDF ya .xlsx bill supported hai.")
-    company = manual_bill_labeled_value(lines, ("bankname", "bank", "companyname"))
+    receiver = manual_bill_receiver(lines)
+    company = receiver or manual_bill_labeled_value(lines, ("bankname", "bank", "companyname"))
     if not company:
         recipient = manual_bill_labeled_value(lines, ("billto", "billedto"))
         if re.search(r"bank|finance|housing|capital", recipient, re.I):
             company = recipient
-    branch = manual_bill_labeled_value(lines, ("branchname", "branch"))
+    branch = manual_bill_inline_value(
+        lines, r"\b(?:bank\s+)?branch(?:\s+name)?\s*:\s*([^\n]+)$"
+    ) or manual_bill_labeled_value(lines, ("branchname",))
+    branch = branch or manual_bill_inline_value(
+        lines, r"\b(?:bank\s+)?branch\s+name\s*[:=-]?\s*([^\n]+)$"
+    )
     invoice_number = valid_invoice(manual_bill_labeled_value(lines, ("invoicenumber", "invoiceno", "billnumber", "billno")))
+    invoice_number = invoice_number or valid_invoice(manual_bill_inline_value(
+        lines, r"\b(?:invoice\s*(?:number|no\.?)|bill\s*(?:number|no\.?)|bill\s+reference\s+no\.?)\s*(?::\s*-?|-|=)?\s*([A-Za-z0-9][A-Za-z0-9/_-]{2,119})"
+    ))
     invoice_date = manual_bill_date(manual_bill_labeled_value(lines, ("invoicedate", "billdate", "date")))
+    invoice_date = invoice_date or manual_bill_date(manual_bill_inline_value(
+        lines, r"\b(?:invoice\s+date|date\s+of\s+bill)\s*(?::\s*-?|-|=)?\s*(\d{1,2}(?:[./-]\d{1,2}[./-]\d{2,4}|\s+[A-Za-z]{3,9}\s+\d{4}))"
+    ))
     gst_number = ""
-    gst_match = re.search(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", " ".join(lines).upper())
-    if gst_match:
-        gst_number = gst_match.group(0)
+    gst_matches = re.findall(
+        r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", " ".join(lines).upper()
+    )
+    if gst_matches:
+        gst_number = gst_matches[-1]
     taxable = manual_bill_number(manual_bill_labeled_value(lines, ("taxablevalue", "taxableamount", "subtotal", "amountbeforegst", "withoutgst")))
-    cgst = manual_bill_number(manual_bill_labeled_value(lines, ("cgstamount", "cgst")))
-    sgst = manual_bill_number(manual_bill_labeled_value(lines, ("sgstamount", "sgst")))
-    igst = manual_bill_number(manual_bill_labeled_value(lines, ("igstamount", "igst")))
+    cgst = manual_bill_inline_amount(lines, r"\bcgst\b") or manual_bill_number(manual_bill_labeled_value(lines, ("cgstamount", "cgst")))
+    sgst = manual_bill_inline_amount(lines, r"\bsgst\b") or manual_bill_number(manual_bill_labeled_value(lines, ("sgstamount", "sgst")))
+    igst = manual_bill_inline_amount(lines, r"\bigst\b") or manual_bill_number(manual_bill_labeled_value(lines, ("igstamount", "igst")))
+    part_a_total = manual_bill_inline_amount(lines, r"\bpart\s+a\s+total\s+amount\b")
+    table_total = manual_bill_inline_amount(
+        lines, r"\b(?:total\s+bill\s+amount(?!\s+including)|(?<!gross\s)total(?!\s+amount|\s+with))\b"
+    )
+    taxable = part_a_total or taxable or table_total
     gst = round(cgst + sgst + igst, 2)
     if not gst:
         gst = manual_bill_number(manual_bill_labeled_value(lines, ("gstamount", "totaltax", "taxamount")))
-    gross = manual_bill_number(manual_bill_labeled_value(lines, ("grandtotal", "invoicetotal", "totalwithgst", "totalamount", "netpayable")))
+    gross = manual_bill_inline_amount(
+        lines, r"\b(?:total\s+bill\s+amount\s+including\s+tax|total\s+fee\s+amount|grand\s+total|gross\s+total|invoice\s+total|total\s+with\s+gst)\b"
+    ) or manual_bill_inline_amount(lines, r"^\s*total\s+amount\b") or manual_bill_number(
+        manual_bill_labeled_value(lines, ("grandtotal", "invoicetotal", "totalwithgst", "totalamount", "netpayable"))
+    )
+    table_taxable, table_gross = manual_bill_table_totals(lines, gst)
+    if table_taxable and table_gross:
+        taxable, gross = table_taxable, table_gross
     if not taxable and gross and gst:
         taxable = round(gross - gst, 2)
     if not gross and (taxable or gst):
         gross = round(taxable + gst, 2)
     company = re.sub(r"\s+", " ", company).strip(" :-") or "Review Required"
-    invoice_number = re.sub(r"\s+", " ", invoice_number).strip(" :-")
+    invoice_number = re.sub(r"\s+", " ", invoice_number).strip(" .:-*")
+    # Layout extraction can append the neighbouring "Month" column to an
+    # otherwise valid invoice number.  Keep one canonical number so matching
+    # PDF/XLSX copies are not saved as separate bills.
+    invoice_number = re.sub(r"\s+month\b.*$", "", invoice_number, flags=re.I).strip()
     return {
         "company_name": company[:180], "branch_name": branch[:180], "invoice_number": invoice_number[:120],
         "invoice_date": invoice_date, "gst_number": gst_number,
@@ -5488,6 +5700,135 @@ def parse_manual_bill_content(filename, content):
         "source_filename": secure_filename(filename) or "manual-bill",
         "review_required": not all((company != "Review Required", branch, invoice_number, invoice_date, taxable, gross)) or abs(taxable + gst - gross) > 0.02,
     }
+
+
+def manual_bill_folder_bank(filename):
+    parts = [part for part in str(filename or "").replace("\\", "/").split("/")[:-1] if part]
+    folder = normalized_header(parts[0] if parts else "")
+    names = {"abcl": "Aditya Birla Capital", "adhar": "Aadhar Housing Finance", "au": "AU Small Finance Bank", "ayefinance": "Aye Finance", "bajaj": "Bajaj Housing Finance Limited", "dcb": "DCB Bank", "dmi": "DMI Finance", "esaf": "ESAF Small Finance Bank", "fusion": "Fusion Micro Finance", "grihum": "Grihum Housing Finance", "hdfc": "HDFC Bank", "idfc": "IDFC First Bank", "jm": "JM Financial", "laxmi": "Laxmi India Finance", "muthuth": "Muthoot Finance", "piramal": "Piramal Finance", "sbfc": "SBFC Finance", "smfg": "SMFG India Home Finance", "ugro": "UGRO Capital", "ujjivan": "Ujjivan Small Finance Bank", "ummeed": "Ummeed Housing Finance", "wonder": "Wonder Home Finance", "yesbank": "YES Bank"}
+    return names.get(folder, "")
+
+
+def manual_bill_register_bank(sheet_name):
+    """Use the workbook tab as the bank, not text from a row's customer column."""
+    normalized = normalized_header(sheet_name)
+    names = {
+        "au": "AU Small Finance Bank", "aay": "Aye Finance",
+        "adityabirlacapital": "Aditya Birla Capital",
+        "adityahl": "Aditya Birla Housing Finance", "aadhar": "Aadhar Housing Finance",
+        "bajaj": "Bajaj Housing Finance Limited", "canfin": "Can Fin Homes",
+        "dcb": "DCB Bank", "dmi": "DMI Finance", "easy": "Easy Home Finance",
+        "esafbank": "ESAF Small Finance Bank", "fusion": "Fusion Micro Finance",
+        "godrej": "Godrej Housing Finance", "gruham": "Grihum Housing Finance",
+        "hdfc": "HDFC Bank", "idfcbank": "IDFC First Bank", "jm": "JM Financial",
+        "kifs": "KIFS Housing Finance", "laxmiindia": "Laxmi India Finance",
+        "moti": "Motilal Oswal Home Finance", "muthutred": "Muthoot Finance",
+        "muthootfin": "Muthoot Finance", "piramal": "Piramal Finance",
+        "sbfc": "SBFC Finance", "smfg": "SMFG India Home Finance",
+        "ujjivan": "Ujjivan Small Finance Bank", "ugroaudit": "UGRO Capital",
+        "ummid": "Ummeed Housing Finance", "wonder": "Wonder Home Finance",
+        "yesbank": "YES Bank",
+    }
+    return names.get(normalized, re.sub(r"\s+", " ", str(sheet_name or "")).strip())
+
+
+def manual_bill_register_rows(filename, content):
+    """Parse a bank-wise Excel register into validated invoice rows.
+
+    Registers commonly contain an invoice date before the Base/GST/Total columns.
+    The triple is accepted only when Base + GST equals Total, so date serials and
+    payment/UTR columns cannot be saved as money.
+    """
+    if Path(filename or "").suffix.lower() != ".xlsx":
+        return []
+    month_numbers = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                     "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+    invoice_pattern = re.compile(r"(?:SA|SVAI)/([A-Z]+)/?(?:26|2026)/(\d{1,6})", re.I)
+
+    def money(value):
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return round(float(value), 2)
+        try:
+            return round(float(str(value).replace(",", "").replace("₹", "").strip()), 2)
+        except (TypeError, ValueError):
+            return None
+
+    def totals(values, invoice_column):
+        amounts = []
+        for column, value in enumerate(values[invoice_column + 1:], invoice_column + 1):
+            value_as_money = money(value)
+            if (value_as_money is None or value_as_money <= 0 or value_as_money > 10_000_000 or
+                    isinstance(value, (date, datetime)) or
+                    (isinstance(value, (int, float)) and 35_000 <= value_as_money <= 60_000)):
+                continue
+            amounts.append((column, value_as_money))
+        for index in range(len(amounts) - 2):
+            base_column, base = amounts[index]
+            gst_column, gst = amounts[index + 1]
+            total_column, gross = amounts[index + 2]
+            if (gst_column - base_column <= 3 and total_column - gst_column <= 3 and
+                    gst <= base * .35 and abs(base + gst - gross) <= max(1, gross * .002)):
+                return base, gst, gross
+        return None
+
+    rows = []
+    try:
+        workbook = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+        # A one-sheet invoice is handled by the existing single-bill parser.
+        # The bank-wise register supplied for historical import has many tabs.
+        if len(workbook.worksheets) < 2:
+            workbook.close()
+            return []
+        for sheet in workbook.worksheets:
+            bank = manual_bill_register_bank(sheet.title)
+            for row in sheet.iter_rows(values_only=True):
+                values = list(row)
+                invoice_column = next((column for column, value in enumerate(values)
+                                       if invoice_pattern.search(str(value or ""))), None)
+                if invoice_column is None:
+                    continue
+                invoice_match = invoice_pattern.search(str(values[invoice_column]))
+                month_key = invoice_match.group(1).upper()[:3]
+                if month_key not in month_numbers:
+                    continue
+                billing_period = f"2026-{month_numbers[month_key]:02d}"
+                if billing_period not in {"2026-04", "2026-05", "2026-06", "2026-07", "2026-08"}:
+                    continue
+                result = totals(values, invoice_column)
+                if not result:
+                    continue
+                taxable, gst, gross = result
+                invoice_number = f"SA/{invoice_match.group(1).upper()}/26/{invoice_match.group(2)}"
+                invoice_date = next((value for value in values[invoice_column + 1:]
+                                     if isinstance(value, (date, datetime))), None)
+                rows.append({
+                    "billing_period": billing_period,
+                    "company_name": bank[:180], "branch_name": "", "invoice_number": invoice_number[:120],
+                    "invoice_date": invoice_date.date() if isinstance(invoice_date, datetime) else invoice_date,
+                    "gst_number": "", "taxable_value": taxable, "gst_amount": gst, "gross_amount": gross,
+                    "source_filename": secure_filename(filename) or "billing-register.xlsx",
+                    "review_required": True,
+                })
+        workbook.close()
+    except Exception as exc:
+        raise ValueError(f"{filename}: Excel register read nahi hua: {exc}")
+    return rows
+
+
+def manual_bill_importable(parsed):
+    return bool(valid_invoice(parsed.get("invoice_number")) and parsed.get("gross_amount", 0) > 0)
+
+
+def manual_bill_quality(parsed):
+    score = sum(bool(parsed.get(field)) for field in ("company_name", "branch_name", "invoice_number", "invoice_date", "taxable_value", "gross_amount"))
+    return score - (4 if parsed.get("company_name") == "Review Required" else 0)
+
+
+def manual_bill_invoice_key(invoice_number):
+    invoice_number = re.sub(r"\s+month\b.*$", "", str(invoice_number or ""), flags=re.I)
+    return re.sub(r"[^A-Z0-9]", "", invoice_number.upper())
 
 
 def manual_bill_mis_workbook(period, rows):
@@ -5615,6 +5956,20 @@ def filtered_manual_bills(month):
     return sorted(rows, key=lambda row: (row.company_name.casefold(), row.branch_name.casefold(), row.invoice_date or date.min, row.id))
 
 
+def manual_bill_invoice_series(company_name):
+    """Return the latest known manual invoice and the next numeric suggestion."""
+    rows = ManualBillRecord.query.filter_by(company_name=company_name).all()
+    candidates = []
+    for row in rows:
+        match = re.match(r"^(.*?)(\d+)$", (row.display_invoice_number or "").strip())
+        if match:
+            candidates.append((int(match.group(2)), match.group(1), row.display_invoice_number))
+    if not candidates:
+        return {"latest": "", "next": ""}
+    number, prefix, latest = max(candidates, key=lambda item: item[0])
+    return {"latest": latest, "next": f"{prefix}{number + 1}"}
+
+
 @app.route("/billing", methods=["GET", "POST"])
 @login_required
 def billing_page():
@@ -5646,6 +6001,7 @@ def billing_page():
             "taxable": round(sum(item.taxable_value for item in company_rows), 2),
             "gst": round(sum(item.gst_amount for item in company_rows), 2),
             "gross": round(sum(item.gross_amount for item in company_rows), 2),
+            "invoice_series": manual_bill_invoice_series(company_name),
         })
     manual_totals = {
         "bills": len(manual_bills),
@@ -5668,30 +6024,89 @@ def import_manual_bill_mis():
         uploads = [upload for upload in request.files.getlist("bill_files") if upload and upload.filename]
         if not uploads:
             raise ValueError("PDF/XLSX bill files select karein.")
-        imported = updated = review = 0
-        for filename, content in bill_inputs(uploads, read_upload_limited):
-            parsed = parse_manual_bill_content(filename, content)
-            if not parsed["invoice_number"]:
-                parsed["invoice_number"] = review_identifier(content)
-                parsed["review_required"] = True
-            record = ManualBillRecord.query.filter_by(
-                billing_period=period, company_name=parsed["company_name"],
-                invoice_number=parsed["invoice_number"],
-            ).first()
-            if record:
+        imported = updated = review = skipped = duplicates = 0
+        candidates = {}
+        for filename, content in bill_inputs(uploads, read_manual_bill_upload):
+            register_rows = manual_bill_register_rows(filename, content)
+            parsed_rows = register_rows or [parse_manual_bill_content(filename, content)]
+            for parsed in parsed_rows:
+                parsed.setdefault("billing_period", period)
+                fallback_bank = manual_bill_folder_bank(filename)
+                # The supplied monthly ZIP is organized bank-wise.  Its top-level
+                # folder is more reliable than the vendor's own service-provider
+                # bank details printed inside an invoice.
+                if fallback_bank:
+                    parsed["company_name"] = fallback_bank
+                if not manual_bill_importable(parsed):
+                    skipped += 1
+                    continue
+                key = (parsed["billing_period"], manual_bill_invoice_key(parsed["invoice_number"]))
+                previous = candidates.get(key)
+                if previous and manual_bill_quality(previous[1]) >= manual_bill_quality(parsed):
+                    duplicates += 1
+                    continue
+                if previous:
+                    duplicates += 1
+                candidates[key] = (filename, parsed, bool(register_rows))
+        existing_by_invoice = {}
+        candidate_periods = {parsed["billing_period"] for _, parsed, _ in candidates.values()}
+        for row in ManualBillRecord.query.filter(ManualBillRecord.billing_period.in_(candidate_periods)).all():
+            existing_by_invoice.setdefault((row.billing_period, manual_bill_invoice_key(row.invoice_number)), []).append(row)
+        for invoice_key, (filename, parsed, is_register_import) in candidates.items():
+            matching_rows = existing_by_invoice.get(invoice_key, [])
+            record = next((row for row in matching_rows if row.company_name == parsed["company_name"]), None)
+            clearly_broken = record and (
+                not record.company_name or record.taxable_value <= 0 or record.gross_amount <= 0 or
+                abs(record.gross_amount - record.gst_amount) <= 0.02
+            )
+            amount_mismatch = record and any(
+                abs(current - expected) > 0.02 for current, expected in (
+                    (record.taxable_value, parsed["taxable_value"]),
+                    (record.gst_amount, parsed["gst_amount"]),
+                    (record.gross_amount, parsed["gross_amount"]),
+                )
+            )
+            if record and not (record.needs_review and (clearly_broken or (is_register_import and amount_mismatch))):
                 updated += 1
                 continue
+            if record is None and matching_rows:
+                record = matching_rows[0]
+                clearly_broken = (
+                    not record.company_name or record.taxable_value <= 0 or record.gross_amount <= 0 or
+                    abs(record.gross_amount - record.gst_amount) <= 0.02
+                )
+                amount_mismatch = any(
+                    abs(current - expected) > 0.02 for current, expected in (
+                        (record.taxable_value, parsed["taxable_value"]),
+                        (record.gst_amount, parsed["gst_amount"]),
+                        (record.gross_amount, parsed["gross_amount"]),
+                    )
+                )
+                if not (record.needs_review and (clearly_broken or (is_register_import and amount_mismatch))):
+                    updated += 1
+                    continue
+            if record:
+                updated += 1
             else:
                 record = ManualBillRecord(billing_period=period)
                 imported += 1
             for field, value in parsed.items():
+                if field in {"branch_name", "invoice_date", "gst_number"} and not value and getattr(record, field, None):
+                    continue
                 setattr(record, field, value)
             db.session.add(record)
+            # An earlier incomplete parser could save the PDF and XLSX copy as
+            # separate rows under different bank text.  A re-upload must leave
+            # only this canonical invoice row; payment metadata stays on it.
+            for duplicate in matching_rows:
+                if duplicate.id != record.id and duplicate.needs_review:
+                    db.session.delete(duplicate)
             review += int(record.review_required)
         if not imported and not updated:
-            raise ValueError("No PDF/XLSX bills found in the upload.")
+            raise ValueError("ZIP me valid invoice number aur amount wale bills nahi mile.")
         db.session.commit()
-        flash(f"{period}: {imported} manual bills imported, {updated} duplicates skipped, {review} review required.", "success")
+        periods = ", ".join(sorted(candidate_periods)) or period
+        flash(f"{periods}: {imported} bills saved, {updated + duplicates} duplicate PDF/XLSX copies skipped, {skipped} non-invoice files ignored, {review} review required.", "success")
     except (ValueError, TypeError) as exc:
         db.session.rollback()
         flash(str(exc), "error")
@@ -5719,6 +6134,23 @@ def update_manual_bill_mis(record_id):
             record.review_required = True
         if abs(record.taxable_value + record.gst_amount - record.gross_amount) > 0.02:
             record.review_required = True
+        payment_status = request.form.get("payment_status", "Pending")
+        if payment_status not in {"Pending", "Partly Received", "Received", "Cancelled"}:
+            raise ValueError("Payment status valid nahi hai.")
+        received_amount = nonnegative_number(request.form.get("received_amount", "0"), "Received amount")
+        if payment_status == "Partly Received" and not 0 < received_amount < record.gross_amount:
+            raise ValueError("Partly Received ke liye amount zero se bada aur total se kam rakhein.")
+        if payment_status == "Received":
+            received_amount = record.gross_amount
+        if payment_status in {"Pending", "Cancelled"}:
+            received_amount = 0
+        if record.payment is None:
+            record.payment = ManualBillPayment()
+        record.payment.status = payment_status
+        record.payment.received_amount = received_amount
+        record.payment.tds_amount = 0
+        record.payment.received_date = manual_bill_date(request.form.get("received_date"))
+        record.payment.utr = request.form.get("utr", "").strip()[:180]
         db.session.commit()
         flash(f"{record.invoice_number} manual bill MIS updated.", "success")
     except Exception as exc:
@@ -5945,10 +6377,21 @@ def mark_invoice_gst_filed(invoice_id):
 def gst_register():
     period = request.args.get("period") or datetime.now(APP_TIMEZONE).strftime("%Y-%m")
     rows = Invoice.query.filter_by(billing_period=period).order_by(Invoice.invoice_date).all()
+    manual_rows = ManualBillRecord.query.filter_by(billing_period=period).order_by(
+        ManualBillRecord.company_name, ManualBillRecord.invoice_date, ManualBillRecord.id
+    ).all()
     totals = {k: round(sum(getattr(i, k) for i in rows if i.status != "Cancelled"), 2)
               for k in ("taxable_value", "cgst", "sgst", "igst", "gross_amount")}
+    active_manual_rows = [row for row in manual_rows if row.payment_status != "Cancelled"]
+    totals["manual_taxable"] = round(sum(row.taxable_value for row in active_manual_rows), 2)
+    totals["manual_gst"] = round(sum(row.gst_amount for row in active_manual_rows), 2)
+    totals["manual_gross"] = round(sum(row.gross_amount for row in active_manual_rows), 2)
+    totals["taxable_total"] = round(totals["taxable_value"] + totals["manual_taxable"], 2)
+    totals["gst_total"] = round(totals["cgst"] + totals["sgst"] + totals["igst"] + totals["manual_gst"], 2)
+    totals["gross_total"] = round(totals["gross_amount"] + totals["manual_gross"], 2)
     flagged = [i for i in rows if i.original_invoice_id and db.session.get(Invoice, i.original_invoice_id).gst_filed]
-    return render_template("gst_register.html", rows=rows, totals=totals, period=period, flagged=flagged)
+    return render_template("gst_register.html", rows=rows, manual_rows=manual_rows,
+                           totals=totals, period=period, flagged=flagged)
 
 
 @app.route("/billing/payment-tracking", methods=["GET", "POST"])
@@ -5975,12 +6418,93 @@ def payment_tracking():
         else:
             db.session.commit(); flash("Bank receipt invoice(s) se matched.", "success")
         return redirect(url_for("payment_tracking"))
-    invoices = Invoice.query.filter(Invoice.status.notin_(["Draft", "Cancelled", "Revised"])).order_by(Invoice.invoice_date.desc()).all()
-    transactions = BankingTransaction.query.order_by(BankingTransaction.transaction_date.desc()).all()
-    matched = {row[0]: float(row[1]) for row in db.session.query(InvoicePayment.banking_transaction_id,
-        db.func.sum(InvoicePayment.amount)).filter(InvoicePayment.banking_transaction_id.isnot(None)).group_by(InvoicePayment.banking_transaction_id)}
-    return render_template("payment_tracking.html", invoices=invoices, transactions=transactions,
-        matched=matched, paid_amount=invoice_paid_amount, payment_status=invoice_payment_status)
+    selected_bank = request.args.get("bank", "").strip()
+    manual_query = ManualBillRecord.query
+    if selected_bank:
+        manual_query = manual_query.filter(db.func.lower(ManualBillRecord.company_name) == selected_bank.lower())
+    manual_rows = manual_query.order_by(ManualBillRecord.company_name, ManualBillRecord.billing_period,
+                                         ManualBillRecord.invoice_date, ManualBillRecord.id).all()
+    manual_payment_groups = []
+    for (company_name, billing_period), group_rows in groupby(
+        manual_rows, key=lambda row: (row.company_name, row.billing_period)
+    ):
+        group_rows = list(group_rows)
+        gross = round(sum(row.gross_amount for row in group_rows), 2)
+        received = round(sum(row.settled_amount for row in group_rows), 2)
+        active_rows = [row for row in group_rows if row.payment_status != "Cancelled"]
+        outstanding = round(sum(max(row.gross_amount - row.settled_amount, 0) for row in active_rows), 2)
+        statuses = {row.payment_status for row in group_rows}
+        status = "Cancelled" if statuses == {"Cancelled"} else (
+            "Received" if active_rows and all(row.payment_status == "Received" for row in active_rows)
+            else "Partly Received" if received else "Pending"
+        )
+        manual_payment_groups.append({"company_name": company_name, "billing_period": billing_period,
+                                      "rows": group_rows, "gross": gross, "received": received,
+                                      "outstanding": outstanding, "status": status})
+    bank_name_pattern = re.compile(r"\b(?:bank|finance|housing|capital|financial|grihum|ugro|fusion|muthoot|aadhar|piramal|smfg|ummeed|wonder|dcb|jm|esaf|idfc|au)\b", re.I)
+    available_manual_banks = sorted({row.company_name.strip() for row in ManualBillRecord.query.all()
+                                     if row.company_name and bank_name_pattern.search(row.company_name)
+                                     and not re.search(r":|\binvoice\b|\bfirm\s+name\b", row.company_name, re.I)},
+                                    key=str.casefold)
+    received_transactions = []
+    if selected_bank:
+        received_transactions = [transaction for transaction in BankingTransaction.query.order_by(
+            BankingTransaction.transaction_date.desc(), BankingTransaction.id.desc()
+        ).all() if audit_bank_matches(selected_bank, transaction.payer_name)]
+    manual_bills_by_amount = {}
+    for row in manual_rows:
+        if row.payment_status != "Cancelled":
+            manual_bills_by_amount.setdefault(round(row.gross_amount, 2), []).append((row, "Gross amount exact", 0.0))
+            tds_amount = round(row.taxable_value * 0.10, 2)
+            net_amount = round(row.gross_amount - tds_amount, 2)
+            if tds_amount > 0:
+                manual_bills_by_amount.setdefault(net_amount, []).append((row, "Net amount after 10% TDS", tds_amount))
+    payment_suggestions = []
+    for transaction in received_transactions:
+        candidates = [
+            {"bill": bill, "match_label": label, "tds_amount": tds_amount}
+            for bill, label, tds_amount in manual_bills_by_amount.get(round(transaction.amount, 2), [])
+        ]
+        payment_suggestions.append({"transaction": transaction, "candidates": candidates})
+    return render_template("payment_tracking.html", manual_payment_groups=manual_payment_groups,
+        selected_bank=selected_bank, available_manual_banks=available_manual_banks,
+        payment_suggestions=payment_suggestions)
+
+
+@app.route("/billing/manual-mis/<int:record_id>/match-receipt", methods=["POST"])
+@login_required
+def match_manual_bill_receipt(record_id):
+    record = ManualBillRecord.query.get_or_404(record_id)
+    try:
+        transaction = BankingTransaction.query.get_or_404(int(request.form.get("transaction_id", "0")))
+        if not audit_bank_matches(record.company_name, transaction.payer_name):
+            raise ValueError("Selected bank aur received payment ka bank match nahi karta.")
+        tds_amount = round(record.taxable_value * 0.10, 2)
+        net_after_tds = round(record.gross_amount - tds_amount, 2)
+        gross_match = abs(record.gross_amount - transaction.amount) <= 0.02
+        tds_match = tds_amount > 0 and abs(net_after_tds - transaction.amount) <= 0.02
+        if not (gross_match or tds_match):
+            raise ValueError("Amount invoice gross ya 10% TDS ke baad net amount se match nahi karta.")
+        if transaction.reference_number:
+            used = ManualBillPayment.query.filter(
+                ManualBillPayment.utr == transaction.reference_number,
+                ManualBillPayment.record_id != record.id,
+            ).first()
+            if used:
+                raise ValueError("Ye UTR pehle hi kisi doosre invoice se match ho chuka hai.")
+        if record.payment is None:
+            record.payment = ManualBillPayment()
+        record.payment.status = "Received"
+        record.payment.received_amount = transaction.amount
+        record.payment.tds_amount = tds_amount if tds_match else 0
+        record.payment.received_date = transaction.transaction_date
+        record.payment.utr = transaction.reference_number or f"BANKING-{transaction.id}"
+        db.session.commit()
+        flash(f"{record.display_invoice_number} ko received payment se match kar diya.", "success")
+    except (ValueError, TypeError) as exc:
+        db.session.rollback()
+        flash(str(exc), "error")
+    return redirect(url_for("payment_tracking", bank=record.company_name))
 
 
 @app.route("/billing/company/<path:company_name>")
@@ -6854,6 +7378,14 @@ def start_scheduler():
 
 with app.app_context():
     db.create_all()
+    transaction_columns = {column["name"] for column in inspect(db.engine).get_columns("banking_transaction")}
+    if "entry_type" not in transaction_columns:
+        with db.engine.begin() as connection:
+            connection.execute(text("ALTER TABLE banking_transaction ADD COLUMN entry_type VARCHAR(10) NOT NULL DEFAULT 'Credit'"))
+    manual_payment_columns = {column["name"] for column in inspect(db.engine).get_columns("manual_bill_payment")}
+    if "tds_amount" not in manual_payment_columns:
+        with db.engine.begin() as connection:
+            connection.execute(text("ALTER TABLE manual_bill_payment ADD COLUMN tds_amount FLOAT NOT NULL DEFAULT 0"))
     preserve_existing_banking_payment_history()
 start_scheduler()
 

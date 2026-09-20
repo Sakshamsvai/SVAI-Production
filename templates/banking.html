@@ -160,6 +160,36 @@
 {% else %}
 <section class="card empty">Statement upload karein ya filter badlein. Bank/company-wise incoming payments yahan dikhengi.</section>
 {% endfor %}
+
+<section class="card" id="debit-summary">
+  <div class="section-head">
+    <div>
+      <h2>Debit Summary · Outgoing Payments</h2>
+      <p>Statement ke debit entries recipient/person ke hisaab se total aur month-wise dikhengi.</p>
+    </div>
+    <div class="bank-total">Total Debit <b>₹{{ '{:,.2f}'.format(debit_total) }}</b></div>
+  </div>
+  {% for debit_group in debit_groups %}
+  <details class="banking-bank-group" {% if debit_group.open %}open{% endif %}>
+    <summary>
+      <div><span class="eyebrow">RECIPIENT / PERSON</span><b>{{ debit_group.payer_name }}</b><small>{{ debit_group.transactions|length }} debit(s) · {{ debit_group.months|length }} month(s)</small></div>
+      <div class="bank-total">Paid Till Date <b>₹{{ '{:,.2f}'.format(debit_group.total) }}</b></div>
+    </summary>
+    <div class="bank-history-content">
+      {% for month_group in debit_group.months %}
+      <details class="banking-month-group" {% if loop.first %}open{% endif %}>
+        <summary><div><span class="eyebrow">PAYMENT MONTH</span><b>{{ month_group.label }}</b><small>{{ month_group.transactions|length }} debit(s)</small></div><div class="bank-total">Month Total <b>₹{{ '{:,.2f}'.format(month_group.total) }}</b></div></summary>
+        <div class="table-wrap"><table class="banking-table"><thead><tr><th>Date</th><th>Amount</th><th>UTR / Reference</th><th>Statement Narration</th></tr></thead><tbody>
+          {% for transaction in month_group.transactions %}<tr><td>{{ transaction.transaction_date.strftime('%d-%m-%Y') }}</td><td class="amount">₹{{ '{:,.2f}'.format(transaction.amount) }}</td><td class="mono">{{ transaction.reference_number or '-' }}</td><td>{{ transaction.narration }}</td></tr>{% endfor %}
+        </tbody></table></div>
+      </details>
+      {% endfor %}
+    </div>
+  </details>
+  {% else %}
+  <p class="note">Abhi selected statement/filter me debit entries nahi hain. Debit column wali Excel statement upload karne par summary yahin banegi.</p>
+  {% endfor %}
+</section>
 {% endblock %}
 
 
