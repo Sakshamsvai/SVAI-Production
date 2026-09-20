@@ -1945,6 +1945,18 @@ BANK BRANCH NAME BHOPAL"""
         )
         self.assertEqual(extracted["contact_number"], "9039680140")
 
+    def test_dcb_customer_name_allows_dash_after_colon(self):
+        extracted = regex_email_extract(
+            "New Request To Vendor",
+            "Greetings from DCB Bank!\n"
+            "A new service request has been assigned to you application ID APPL01898651.\n"
+            "Customer Name: - RAHUL PANTHI.\n"
+            "Customer Number: - 8319804954.",
+            "noreply@dcb.bank.in",
+        )
+        self.assertEqual(extracted["customer_name"], "RAHUL PANTHI")
+        self.assertEqual(extracted["contact_number"], "8319804954")
+
     def test_public_mail_sender_keeps_strong_new_assignment_only(self):
         self.assertTrue(deterministic_email_candidate(
             "Fresh Technical Valuation - Application No LAPGUN100030646",

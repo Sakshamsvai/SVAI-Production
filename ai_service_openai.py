@@ -803,7 +803,7 @@ def regex_email_extract(subject, body, sender):
         r"(?im)^\s*applicant\s+name\s*[:=\-]\s*"
         r"(?:mr|mrs|ms|smt|shri)?\.?\s*([A-Za-z][A-Za-z .'-]{1,80})$",
         r"(?im)(?:customer|applicant|borrower)\s*(?:/s)?\s*(?:name(?:/s)?)?"
-        r"\s*(?:[:=\-]\s*|\s+)(?:mr|mrs|ms|smt|shri)?\.?\s*"
+        r"\s*(?:(?:[:=\-]\s*)+|\s+)(?:mr|mrs|ms|smt|shri)?\.?\s*"
         r"([A-Za-z][A-Za-z .'-]{1,80}?)(?=\s*(?:\n|\||;|$|"
         r"(?:lead|application|app|case|loan|contact|mobile|property|branch|"
         r"vendor\s+dashboard)\b))",
