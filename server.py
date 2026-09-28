@@ -2302,7 +2302,15 @@ def fetch_mis_message(mail, msg_id):
         else b"\r\n\r\n".join(chunk.rstrip(b"\r\n") for chunk in chunks)
     )
     parsed = email_lib.message_from_bytes(raw)
-    if parsed.get("Subject") or parsed.get("From") or parsed.get("Message-ID"):
+    # Do not accept a partial text/header reply unless it also has the original
+    # mail date.  Otherwise ingestion falls back to ``datetime.utcnow()`` and
+    # an old case appears in today's MIS merely because it was fetched today.
+    if (
+        parsed.get("Subject")
+        and parsed.get("From")
+        and parsed.get("Date")
+        and parsed.get("Message-ID")
+    ):
         return raw
 
     # Gmail can answer a combined HEADER + bounded TEXT request with only the

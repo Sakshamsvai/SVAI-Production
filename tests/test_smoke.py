@@ -1899,6 +1899,47 @@ BANK BRANCH NAME BHOPAL"""
         self.assertIn("GEDA KIRANA STORE", parsed.get_payload())
         self.assertEqual(mailbox.queries[-1], "(BODY.PEEK[HEADER])")
 
+    def test_bounded_fetch_recovers_original_date_when_partial_reply_omits_it(self):
+        class Mailbox:
+            def __init__(self):
+                self.queries = []
+
+            def fetch(self, msg_id, query):
+                self.queries.append(query)
+                if query == "(BODY.PEEK[HEADER])":
+                    return "OK", [(
+                        b"header",
+                        b"Subject: Technical initiation APP-260926\r\n"
+                        b"From: lender@example.com\r\n"
+                        b"Date: Sat, 26 Sep 2026 17:52:00 +0530\r\n"
+                        b"Message-ID: <app-260926@example.com>\r\n",
+                    )]
+                return "OK", [(
+                    b"partial",
+                    b"Subject: Technical initiation APP-260926\r\n"
+                    b"From: lender@example.com\r\n"
+                    b"Message-ID: <app-260926@example.com>\r\n\r\n"
+                    b"Property Address\r\nH no 111 Saleha Residency Khajuria Kalan Bhopal",
+                )]
+
+        raw = fetch_mis_message(Mailbox(), b"10")
+        parsed = __import__("email").message_from_bytes(raw)
+        self.assertEqual(parsed.get("Date"), "Sat, 26 Sep 2026 17:52:00 +0530")
+
+    def test_bajaj_property_address_table_stops_before_product(self):
+        extracted = regex_email_extract(
+            "TECHNICAL INITIATION // H430HLD1959607 // SHIVAM RAJPUT THAKUR // BHOPAL",
+            "Property Address\nH no 111 Saleha Residency Khajuria Kalan Bhopal\n"
+            "Product\nAFFORDABLE - Rural & Emerging\nLoan Amount\n35LAKH\n"
+            "Loan Applicant Name\nSHIVAM RAJPUT THAKUR",
+            "rishabh.bachle@bajajhousing.biz",
+        )
+        self.assertEqual(
+            extracted["property_address"],
+            "H no 111 Saleha Residency Khajuria Kalan Bhopal",
+        )
+        self.assertNotIn("AFFORDABLE", extracted["property_address"])
+
     def test_bounded_fetch_falls_back_for_yahoo_style_imap_error(self):
         class YahooMailbox:
             def __init__(self):

@@ -435,7 +435,8 @@ def _valid_property_address(value):
     location_markers = (
         "plot", "survey", "khasra", "village", "vill", "ward", "tehsil",
         "district", "dist", "road", "street", "colony", "house", "mouja",
-        "flat", "shop", "property",
+        "flat", "shop", "property", "residency", "residence", "h no",
+        "house no", "house number",
     )
     return (
         10 <= len(value) <= 700
@@ -862,14 +863,14 @@ def regex_email_extract(subject, body, sender):
     property_address = _first_match([
         r"(?ims)(?:property|site|collateral)\s*address(?:\s+as\s+per\s+\w+)?"
         r"\s*(?:[:=\-]\s*|\n+)(.{10,700}?)(?=\n\s*(?:mobile|contact|branch|bank|"
-        r"applicant|customer|case|loan)\b|\n\s*\n|$)",
+        r"applicant|customer|case|loan|product)\b|\n\s*\n|$)",
         r"(?ims)address\s+of\s+(?:the\s+)?property(?:\s+to\s+be\s+mortgaged"
         r"(?:\s+with\s+pin\s+code)?)?\s*(?:[:=\-]\s*|\n+)"
         r"(.{10,700}?)(?=\n\s*\n|$)",
         r"(?ims)(?:property\s+location|location\s+of\s+(?:the\s+)?property|"
         r"site\s+location|collateral\s+property)\s*(?:[:=\-]\s*|\n+)"
         r"(.{10,700}?)(?=\n\s*(?:mobile|contact|branch|bank|applicant|customer|"
-        r"case|loan|boundar(?:y|ies)|area|land)\b|\n\s*\n|$)",
+        r"case|loan|product|boundar(?:y|ies)|area|land)\b|\n\s*\n|$)",
     ], text, lambda value: _space(value) if _valid_property_address(value) else "")
 
     # Several lender templates are HTML tables. Depending on the mail client,
