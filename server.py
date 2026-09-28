@@ -502,6 +502,19 @@ class BankingPaymentHistory(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
 
+class BankingDebitHistory(db.Model):
+    """Permanent, duplicate-free outgoing-payment ledger for the Debit Audit."""
+    id = db.Column(db.Integer, primary_key=True)
+    transaction_date = db.Column(db.Date, nullable=False, index=True)
+    recipient_name = db.Column(db.String(180), nullable=False, default="Unknown / Review", index=True)
+    amount = db.Column(db.Float, nullable=False)
+    reference_number = db.Column(db.String(180), default="")
+    narration = db.Column(db.Text, nullable=False)
+    source_statement_filename = db.Column(db.String(255), nullable=False, default="")
+    identity_key = db.Column(db.String(512), nullable=False, unique=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
 class BillAuditBatch(db.Model):
     """A final bill/register upload retained as structured rows for payment audit."""
     id = db.Column(db.Integer, primary_key=True)
@@ -1679,7 +1692,12 @@ def existing_case_for_application(application_number, exclude_case=None, subject
     key = normalized_application_number(application_number)
     if not key:
         return None
-    candidates = ValuationCase.query.filter_by(archived=False).order_by(
+    # A cancelled/archived row still owns its application number.  A lender can
+    # send the same initiation again after a report is cancelled or restarted;
+    # that mail belongs in its audit trail, never as a second MIS case.  Prefer
+    # an active case where both exist, then fall back to the archived record.
+    candidates = ValuationCase.query.order_by(
+        ValuationCase.archived.asc(),
         db.func.coalesce(
             ValuationCase.email_received_at, ValuationCase.created_at
         ).asc(),
@@ -1702,6 +1720,76 @@ def existing_case_for_application(application_number, exclude_case=None, subject
         if threaded:
             return threaded
     return matches[0] if matches else None
+
+
+def normalized_customer_name(value):
+    """Conservative key for a follow-up that has no usable application number."""
+    return re.sub(r"[^a-z0-9]", "", str(value or "").casefold())
+
+
+def is_status_or_document_followup(subject, body=""):
+    """Recognise non-assignment status/document traffic without hiding new work."""
+    text = re.sub(r"\s+", " ", f"{subject or ''}\n{latest_email_body(body)}").strip()
+    if re.search(
+        r"(?i)\b(?:new|fresh|subsequent|re[\s-]*visit|part|tranche)\b"
+        r".{0,80}\b(?:assignment|valuation|visit|case)\b",
+        text,
+    ):
+        return False
+    return bool(re.search(
+        r"(?i)\b(?:case|report|technical|valuation)\s+status\b|"
+        r"\bstatus\s+(?:update|mail|requested|required|pending)\b|"
+        r"\b(?:please\s+find|pfa|attached|upload(?:ed)?|submit(?:ted)?)\b"
+        r".{0,50}\bdocument(?:s)?\b|"
+        r"\bdocument(?:s)?\s+(?:attached|uploaded|submitted|shared)\b",
+        text,
+    ))
+
+
+def is_name_only_existing_case_followup(details, subject, body=""):
+    """Allow a unique-name merge only for non-assignment DCB/bank follow-ups."""
+    text = re.sub(r"\s+", " ", f"{subject or ''}\n{latest_email_body(body)}").strip()
+    if re.search(
+        r"(?i)\b(?:new|fresh|subsequent|re[\s-]*visit|part|tranche)\b"
+        r".{0,80}\b(?:assignment|valuation|visit|case)\b",
+        text,
+    ):
+        return False
+    return bool(
+        is_status_or_document_followup(subject, body)
+        or is_followup_email(subject, body)
+        or details.get("correction_mail")
+        or details.get("correction_request_mail")
+        or details.get("system_pending_mail")
+        or re.search(
+            r"(?i)\b(?:revised?|revision|correction)\s+(?:technical|valuation)?\s*report\b",
+            text,
+        )
+    )
+
+
+def existing_case_for_customer_followup(details):
+    """Find one safe existing case for name-only status/document mail.
+
+    A name alone is never used for a new valuation assignment.  It is used only
+    for follow-up mail and only where it identifies exactly one active case.
+    """
+    name_key = normalized_customer_name(details.get("customer_name", ""))
+    if len(name_key) < 4:
+        return None
+    candidates = [
+        item for item in ValuationCase.query.filter_by(archived=False).all()
+        if normalized_customer_name(item.customer_name) == name_key
+    ]
+    bank_key = normalized_header(details.get("bank_name", ""))
+    if bank_key:
+        same_bank = [
+            item for item in candidates
+            if normalized_header(item.bank_name) == bank_key
+        ]
+        if same_bank:
+            candidates = same_bank
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def existing_case_for_duplicate_assignment(details, account, subject="", received=None):
@@ -1814,6 +1902,7 @@ def apply_followup_to_existing_case(
         return False
     legacy_header_loss = bool(target.source_email and not (target.email_subject or "").strip())
     fill_if_missing = {
+        "application_number": details.get("application_number", ""),
         "customer_name": details.get("customer_name", ""),
         "contact_number": details.get("contact_number", ""),
         "property_address": details.get("property_address", ""),
@@ -1822,7 +1911,7 @@ def apply_followup_to_existing_case(
     }
     for field, value in fill_if_missing.items():
         current = (getattr(target, field, "") or "").strip()
-        repair_from_header = legacy_header_loss and field in {"customer_name", "bank_name"}
+        repair_from_header = legacy_header_loss and field in {"application_number", "customer_name", "bank_name"}
         repair_invalid_customer = field == "customer_name" and invalid_email_customer_name(current)
         if value and (not current or repair_from_header or repair_invalid_customer):
             setattr(target, field, str(value).strip())
@@ -1857,6 +1946,43 @@ FOLLOWUP_ONLY_STATUSES = {
 }
 
 
+def repair_missing_customer_names_from_subjects():
+    """Repair only blank names that the stored bank subject states explicitly.
+
+    This is deliberately not a guesser: it never changes a nonblank name and
+    only uses the existing subject line for HDFC/SIB review rows.  It repairs
+    older fetched mail without needing mailbox credentials or a full refetch.
+    """
+    changed = 0
+    candidates = ValuationCase.query.filter(
+        ValuationCase.archived.is_(False),
+        db.or_(ValuationCase.customer_name.is_(None), ValuationCase.customer_name == ""),
+        ValuationCase.email_subject.isnot(None),
+        db.or_(
+            ValuationCase.bank_name.ilike("%HDFC%"),
+            ValuationCase.bank_name.ilike("%SIB%"),
+        ),
+    ).all()
+    for case in candidates:
+        details = ai_extract_email(
+            case.email_subject or "", "", case.source_email or ""
+        )
+        name = re.sub(r"\s+", " ", str(details.get("customer_name") or "")).strip()
+        if not name or invalid_email_customer_name(name):
+            continue
+        case.customer_name = name
+        if not case.application_number and details.get("application_number"):
+            case.application_number = details["application_number"]
+        if not case.case_type and details.get("case_type"):
+            case.case_type = details["case_type"]
+        if case.application_number and case.customer_name and case.case_type:
+            case.status = "New - Email"
+        changed += 1
+    if changed:
+        db.session.commit()
+    return changed
+
+
 def clean_non_billing_followups():
     """Repair legacy follow-up mutations and hide standalone action mails."""
     changed = 0
@@ -1888,7 +2014,49 @@ def clean_non_billing_followups():
             changed += 1
     if changed:
         db.session.commit()
-    return changed
+    return changed + repair_missing_customer_names_from_subjects() + archive_empty_email_cases()
+
+
+def archive_empty_email_cases():
+    """Hide legacy mail rows that contain no case identity at all.
+
+    A lender/bank label or generic product word alone is not a valuation case.
+    Source mail remains in the linked mailbox; this only removes the empty MIS
+    shell from normal work and exports.
+    """
+    empty_rows = ValuationCase.query.filter(
+        ValuationCase.archived.is_(False),
+        ValuationCase.source_email.isnot(None),
+        db.or_(ValuationCase.application_number.is_(None), ValuationCase.application_number == ""),
+        db.or_(ValuationCase.customer_name.is_(None), ValuationCase.customer_name == ""),
+        db.or_(ValuationCase.contact_number.is_(None), ValuationCase.contact_number == ""),
+        db.or_(ValuationCase.property_address.is_(None), ValuationCase.property_address == ""),
+    ).all()
+    archived = 0
+    for case in empty_rows:
+        # Older parser versions sometimes missed a complete identity that was
+        # plainly present in the stored subject. Repair that evidence first;
+        # only a genuinely content-free shell is hidden.
+        details = ai_extract_email(
+            case.email_subject or "", "", case.source_email or ""
+        )
+        for field in ("application_number", "customer_name", "case_type", "branch_name"):
+            value = (details.get(field) or "").strip()
+            if value and not (getattr(case, field, "") or "").strip():
+                setattr(case, field, value)
+        if any((
+            case.application_number, case.customer_name,
+            case.contact_number, case.property_address,
+        )):
+            if case.application_number and case.customer_name and case.case_type:
+                case.status = "New - Email"
+            continue
+        case.archived = True
+        case.status = "Ignored - no case identity in email"
+        archived += 1
+    if empty_rows:
+        db.session.commit()
+    return archived
 
 
 def email_case_status(details):
@@ -2409,6 +2577,12 @@ def _fetch_email_account_unlocked(
                 or details.get("correction_request_mail")
                 or details.get("system_pending_mail")
             )
+            name_only_followup = bool(
+                not details.get("application_number")
+                and is_name_only_existing_case_followup(details, subject, body)
+                and existing_case_for_customer_followup(details)
+            )
+            non_billing_followup = non_billing_followup or name_only_followup
 
             # Stay fast for normal mail. Only when the address is absent, read
             # supported documents temporarily and discard their bytes after
@@ -2454,17 +2628,32 @@ def _fetch_email_account_unlocked(
                 target = existing_case_for_application(
                     details.get("application_number"), existing_case, subject
                 )
+                if not target and name_only_followup:
+                    target = existing_case_for_customer_followup(details)
                 if not target and existing_case and not existing_case.archived:
                     target = existing_case
                 if target:
                     if apply_followup_to_existing_case(
-                        target, details, attachments, subject, received, unique_id
+                        target, details, attachments, subject, received, unique_id,
+                        action=(
+                            "Same customer status/document mail merged into existing MIS case; no new row created"
+                            if name_only_followup else "Merged into existing MIS case; no new row created"
+                        ),
                     ):
                         updated += 1
                 else:
                     ignored += 1
                 continue
             if not details.get("is_valuation", False):
+                ignored += 1
+                continue
+            # A mail/document with no usable case identity must never create a
+            # blank MIS row.  It may still be attached above when it resolves
+            # to an existing application or a single safe name-only follow-up.
+            if not any((
+                details.get("application_number"), details.get("customer_name"),
+                details.get("contact_number"), details.get("property_address"),
+            )):
                 ignored += 1
                 continue
             duplicate_case = existing_case or existing_case_for_duplicate_assignment(
@@ -3420,7 +3609,11 @@ def dashboard():
             query = query.filter(ValuationCase.status == "Email Parsed - Review")
         else:
             query = filter_billing_ready_cases(query)
-    query = filter_cases_by_dates(query, date_from, date_to)
+    # The header search is used to compare every mail for one application,
+    # including Review mail from an earlier month.  Date limits still apply to
+    # the normal MIS register when there is no search term.
+    if not search:
+        query = filter_cases_by_dates(query, date_from, date_to)
     if search:
         pattern = f"%{search}%"
         query = query.filter(db.or_(
@@ -3518,7 +3711,11 @@ def mis_page():
         # with their status, so an incomplete email never disappears from the day list.
         if show_review:
             query = query.filter(ValuationCase.status == "Email Parsed - Review")
-    query = filter_cases_by_dates(query, date_from, date_to)
+    # Application/customer lookup is intentionally cross-month: the reviewer
+    # must see every matching MIS row before deciding whether a Review email is
+    # a duplicate or a genuinely separate assignment.
+    if not search:
+        query = filter_cases_by_dates(query, date_from, date_to)
     if search:
         pattern = f"%{search}%"
         query = query.filter(db.or_(
@@ -4805,7 +5002,7 @@ def banking_transaction_identity(transaction):
     narration_value = transaction.get("narration", "") if isinstance(transaction, dict) else transaction.narration
     reference = re.sub(r"[^A-Z0-9]", "", str(reference_value or "").upper())
     narration = re.sub(r"[^A-Z0-9]", "", str(narration_value or "").upper())
-    entry_type = transaction.get("entry_type", "Credit") if isinstance(transaction, dict) else transaction.entry_type
+    entry_type = transaction.get("entry_type", "Credit") if isinstance(transaction, dict) else getattr(transaction, "entry_type", "Credit")
     identity = f"REF:{reference}" if reference else f"NARRATION:{narration}"
     return f"{entry_type}:{identity}"
 
@@ -4825,7 +5022,12 @@ def save_banking_payment_history(transactions, source_statement_filename):
         if value("entry_type", "Credit") != "Credit":
             continue
         identity_key = banking_payment_history_key(transaction)
-        if BankingPaymentHistory.query.filter_by(identity_key=identity_key).first():
+        # Versions before entry types were added stored the same key without
+        # the ``Credit:`` prefix. Treat that legacy form as the same payment.
+        legacy_identity_key = identity_key.replace("|Credit:", "|", 1)
+        if BankingPaymentHistory.query.filter(
+            BankingPaymentHistory.identity_key.in_((identity_key, legacy_identity_key))
+        ).first():
             continue
         db.session.add(BankingPaymentHistory(
             transaction_date=value("transaction_date"),
@@ -4840,10 +5042,78 @@ def save_banking_payment_history(transactions, source_statement_filename):
     return added
 
 
+def save_banking_debit_history(transactions, source_statement_filename):
+    """Keep every outgoing debit once, including when statements overlap."""
+    added = 0
+    for transaction in transactions:
+        value = transaction.get if isinstance(transaction, dict) else lambda name, default=None: getattr(transaction, name, default)
+        if value("entry_type", "Credit") != "Debit":
+            continue
+        identity_key = banking_payment_history_key(transaction)
+        if BankingDebitHistory.query.filter_by(identity_key=identity_key).first():
+            continue
+        db.session.add(BankingDebitHistory(
+            transaction_date=value("transaction_date"),
+            recipient_name=value("payer_name", "Unknown / Review") or "Unknown / Review",
+            amount=round(float(value("amount", 0) or 0), 2),
+            reference_number=value("reference_number", "") or "",
+            narration=value("narration", "") or "",
+            source_statement_filename=source_statement_filename,
+            identity_key=identity_key,
+        ))
+        added += 1
+    return added
+
+
+def debit_recipient_key(value):
+    """Group changing bank-account/remark text under the actual recipient name."""
+    text_value = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text_value:
+        return "Unknown / Review"
+    first_part = text_value.split("/", 1)[0].strip(" -:")
+    if first_part.upper() in {"BB", "EMI DEBIT", "CASH WITHDRAWAL"}:
+        return text_value
+    return first_part.title() if first_part else text_value
+
+
+def repair_banking_payment_history_identities():
+    """Collapse legacy/current payment-history copies into one canonical row."""
+    grouped = {}
+    for row in BankingPaymentHistory.query.order_by(BankingPaymentHistory.id).all():
+        grouped.setdefault(banking_payment_history_key(row), []).append(row)
+    removed = 0
+    changed = False
+    keepers = []
+    for canonical_key, rows in grouped.items():
+        keeper = rows[0]
+        for duplicate in rows[1:]:
+            db.session.delete(duplicate)
+            removed += 1
+        keepers.append((keeper, canonical_key))
+    # SQLite enforces the unique index before it considers pending deletes in
+    # the same unit of work, so make those deletes durable before key updates.
+    if removed:
+        db.session.flush()
+    for keeper, canonical_key in keepers:
+        if keeper.identity_key != canonical_key:
+            keeper.identity_key = canonical_key
+            changed = True
+    if removed or changed:
+        db.session.commit()
+    return removed
+
+
 def preserve_existing_banking_payment_history():
     transactions = BankingTransaction.query.order_by(BankingTransaction.id).all()
     for transaction in transactions:
         save_banking_payment_history(transactions=[transaction], source_statement_filename=transaction.statement.filename)
+    db.session.commit()
+
+
+def preserve_existing_banking_debit_history():
+    transactions = BankingTransaction.query.filter_by(entry_type="Debit").order_by(BankingTransaction.id).all()
+    for transaction in transactions:
+        save_banking_debit_history([transaction], transaction.statement.filename)
     db.session.commit()
 
 
@@ -5181,6 +5451,7 @@ def banking_page():
             for item in unique_transactions:
                 db.session.add(BankingTransaction(statement_id=statement.id, **item))
             save_banking_payment_history(unique_transactions, statement.filename)
+            save_banking_debit_history(unique_transactions, statement.filename)
             db.session.commit()
             duplicate_note = f" {duplicate_count} overlapping duplicate entr{'y' if duplicate_count == 1 else 'ies'} skip hui." if duplicate_count else ""
             flash(
@@ -5460,6 +5731,31 @@ def bill_audit_page():
         history_payer=history_payer, history_transactions=history_transactions,
         history_total=round(sum(item.amount for item in history_transactions), 2),
     )
+
+
+@app.route("/banking/debit-audit")
+@login_required
+def debit_audit_page():
+    recipient = request.args.get("recipient", "").strip()
+    month = request.args.get("month", "").strip()
+    query = BankingDebitHistory.query
+    if re.fullmatch(r"\d{4}-\d{2}", month):
+        start = datetime.strptime(month, "%Y-%m").date().replace(day=1)
+        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        query = query.filter(BankingDebitHistory.transaction_date >= start, BankingDebitHistory.transaction_date < end)
+    transactions = query.order_by(BankingDebitHistory.transaction_date.desc(), BankingDebitHistory.id.desc()).all()
+    if recipient:
+        transactions = [item for item in transactions if debit_recipient_key(item.recipient_name) == recipient]
+    recipient_names = sorted({debit_recipient_key(item.recipient_name) for item in BankingDebitHistory.query.all()}, key=str.casefold)
+    month_totals = {}
+    for transaction in transactions:
+        key = transaction.transaction_date.strftime("%Y-%m")
+        month_totals[key] = month_totals.get(key, 0) + transaction.amount
+    return render_template("debit_audit.html", recipient=recipient, month=month,
+        recipient_names=recipient_names, transactions=transactions,
+        total=round(sum(item.amount for item in transactions), 2),
+        month_totals={key: round(value, 2) for key, value in sorted(month_totals.items(), reverse=True)},
+        debit_recipient_key=debit_recipient_key)
 
 
 @app.route("/banking/bill-audit/export")
@@ -6430,7 +6726,7 @@ def payment_tracking():
     ):
         group_rows = list(group_rows)
         gross = round(sum(row.gross_amount for row in group_rows), 2)
-        received = round(sum(row.settled_amount for row in group_rows), 2)
+        received = round(sum(row.received_amount for row in group_rows), 2)
         active_rows = [row for row in group_rows if row.payment_status != "Cancelled"]
         outstanding = round(sum(max(row.gross_amount - row.settled_amount, 0) for row in active_rows), 2)
         statuses = {row.payment_status for row in group_rows}
@@ -6440,7 +6736,8 @@ def payment_tracking():
         )
         manual_payment_groups.append({"company_name": company_name, "billing_period": billing_period,
                                       "rows": group_rows, "gross": gross, "received": received,
-                                      "outstanding": outstanding, "status": status})
+                                      "outstanding": outstanding, "status": status,
+                                      "net_after_tds": round(sum(row.gross_amount - (row.payment.tds_amount if row.payment and row.payment.status == "Received" else round(row.taxable_value * 0.10, 2)) for row in active_rows), 2)})
     bank_name_pattern = re.compile(r"\b(?:bank|finance|housing|capital|financial|grihum|ugro|fusion|muthoot|aadhar|piramal|smfg|ummeed|wonder|dcb|jm|esaf|idfc|au)\b", re.I)
     available_manual_banks = sorted({row.company_name.strip() for row in ManualBillRecord.query.all()
                                      if row.company_name and bank_name_pattern.search(row.company_name)
@@ -6448,27 +6745,33 @@ def payment_tracking():
                                     key=str.casefold)
     received_transactions = []
     if selected_bank:
-        received_transactions = [transaction for transaction in BankingTransaction.query.order_by(
+        received_transactions = [transaction for transaction in BankingTransaction.query.filter_by(entry_type="Credit").order_by(
             BankingTransaction.transaction_date.desc(), BankingTransaction.id.desc()
         ).all() if audit_bank_matches(selected_bank, transaction.payer_name)]
     manual_bills_by_amount = {}
     for row in manual_rows:
-        if row.payment_status != "Cancelled":
+        if row.payment_status == "Pending":
             manual_bills_by_amount.setdefault(round(row.gross_amount, 2), []).append((row, "Gross amount exact", 0.0))
             tds_amount = round(row.taxable_value * 0.10, 2)
             net_amount = round(row.gross_amount - tds_amount, 2)
             if tds_amount > 0:
                 manual_bills_by_amount.setdefault(net_amount, []).append((row, "Net amount after 10% TDS", tds_amount))
     payment_suggestions = []
+    bill_matches = {}
+    used_receipts = {payment.utr for payment in ManualBillPayment.query.all() if payment.utr}
     for transaction in received_transactions:
+        if (transaction.reference_number or f"BANKING-{transaction.id}") in used_receipts:
+            continue
         candidates = [
             {"bill": bill, "match_label": label, "tds_amount": tds_amount}
             for bill, label, tds_amount in manual_bills_by_amount.get(round(transaction.amount, 2), [])
         ]
+        for candidate in candidates:
+            bill_matches.setdefault(candidate["bill"].id, []).append({"transaction": transaction, "match_label": candidate["match_label"]})
         payment_suggestions.append({"transaction": transaction, "candidates": candidates})
     return render_template("payment_tracking.html", manual_payment_groups=manual_payment_groups,
         selected_bank=selected_bank, available_manual_banks=available_manual_banks,
-        payment_suggestions=payment_suggestions)
+        payment_suggestions=payment_suggestions, bill_matches=bill_matches)
 
 
 @app.route("/billing/manual-mis/<int:record_id>/match-receipt", methods=["POST"])
@@ -6477,6 +6780,8 @@ def match_manual_bill_receipt(record_id):
     record = ManualBillRecord.query.get_or_404(record_id)
     try:
         transaction = BankingTransaction.query.get_or_404(int(request.form.get("transaction_id", "0")))
+        if transaction.entry_type != "Credit":
+            raise ValueError("Sirf credit receipt ko bill se match kar sakte hain.")
         if not audit_bank_matches(record.company_name, transaction.payer_name):
             raise ValueError("Selected bank aur received payment ka bank match nahi karta.")
         tds_amount = round(record.taxable_value * 0.10, 2)
@@ -6485,9 +6790,10 @@ def match_manual_bill_receipt(record_id):
         tds_match = tds_amount > 0 and abs(net_after_tds - transaction.amount) <= 0.02
         if not (gross_match or tds_match):
             raise ValueError("Amount invoice gross ya 10% TDS ke baad net amount se match nahi karta.")
-        if transaction.reference_number:
+        receipt_reference = transaction.reference_number or f"BANKING-{transaction.id}"
+        if receipt_reference:
             used = ManualBillPayment.query.filter(
-                ManualBillPayment.utr == transaction.reference_number,
+                ManualBillPayment.utr == receipt_reference,
                 ManualBillPayment.record_id != record.id,
             ).first()
             if used:
@@ -7386,7 +7692,9 @@ with app.app_context():
     if "tds_amount" not in manual_payment_columns:
         with db.engine.begin() as connection:
             connection.execute(text("ALTER TABLE manual_bill_payment ADD COLUMN tds_amount FLOAT NOT NULL DEFAULT 0"))
+    repair_banking_payment_history_identities()
     preserve_existing_banking_payment_history()
+    preserve_existing_banking_debit_history()
 start_scheduler()
 
 

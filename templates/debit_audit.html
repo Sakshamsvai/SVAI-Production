@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Debit Audit · SVAI{% endblock %}
+{% block content %}
+<section class="card audit-payment-viewer">
+  <div class="section-head"><div><h1>Debit Audit · Outgoing Payment History</h1><p>Bank statement ke sabhi debit payments yahan permanent, duplicate-free ledger mein hain. Naam select karke us person/party ka date-wise aur month-wise data dekhein.</p></div><a class="button secondary" href="{{ url_for('banking_page') }}">Back to Banking</a></div>
+  <form method="get" class="banking-filter">
+    <label>Recipient / Person Name
+      <select name="recipient"><option value="">All names</option>{% for name in recipient_names %}<option value="{{ name }}" {% if recipient == name %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>
+    </label>
+    <label>Month <input type="month" name="month" value="{{ month }}"></label>
+    <button class="green">Run Debit Audit</button><a class="button secondary" href="{{ url_for('debit_audit_page') }}">Clear</a>
+  </form>
+</section>
+<section class="stats"><div class="stat"><span>Debit Entries</span><b>{{ transactions|length }}</b></div><div class="stat"><span>Total Paid</span><b>₹{{ '{:,.2f}'.format(total) }}</b></div><div class="stat"><span>Recipients / Persons</span><b>{{ recipient_names|length }}</b></div></section>
+{% if transactions %}
+<section class="card"><h2>{% if recipient %}{{ recipient }} · {% endif %}Date-wise Debit Payments</h2><div class="table-wrap"><table class="banking-table"><thead><tr><th>Date</th><th>Month</th><th>Recipient / Person</th><th>Amount</th><th>UTR / Reference</th><th>Statement Narration</th><th>First Saved From</th></tr></thead><tbody>{% for item in transactions %}<tr><td>{{ item.transaction_date.strftime('%d-%m-%Y') }}</td><td>{{ item.transaction_date.strftime('%Y-%m') }}</td><td>{{ debit_recipient_key(item.recipient_name) }}</td><td class="amount">₹{{ '{:,.2f}'.format(item.amount) }}</td><td class="mono">{{ item.reference_number or '-' }}</td><td>{{ item.narration or '-' }}</td><td>{{ item.source_statement_filename or '-' }}</td></tr>{% endfor %}</tbody></table></div></section>
+<section class="card"><h2>Month-wise Total</h2><div class="table-wrap"><table class="banking-table"><thead><tr><th>Month</th><th>Total Debit</th></tr></thead><tbody>{% for key, amount in month_totals.items() %}<tr><td>{{ key }}</td><td class="amount">₹{{ '{:,.2f}'.format(amount) }}</td></tr>{% endfor %}</tbody></table></div></section>
+{% else %}<section class="card empty">Abhi is filter mein debit payment nahi mila. Debit column wali statement upload hote hi yahan data aayega.</section>{% endif %}
+{% endblock %}

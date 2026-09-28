@@ -51,8 +51,11 @@ from server import (  # noqa: E402
     StaffPaymentProfile, StaffMonthlyPayment, ManualBillRecord, app, apply_email_details,
     apply_followup_to_existing_case, db, encrypt_password, is_followup_email,
     clean_non_billing_followups,
+    repair_missing_customer_names_from_subjects,
     filter_billing_ready_cases,
     existing_case_for_application, existing_case_for_duplicate_assignment, normalized_application_number,
+    existing_case_for_customer_followup, is_status_or_document_followup,
+    is_name_only_existing_case_followup,
     safe_json, valuation_defaults_from_profile, billing_fee_for_km,
     billing_column_map, generate_billing_workbook, merge_cross_mailbox_duplicate_cases,
     email_fetch_folders, mis_import_rows,
@@ -63,6 +66,7 @@ from server import (  # noqa: E402
     staff_payment_amounts, staff_names_from_workbook, staff_monthly_rows_from_workbook,
     banking_month_reconciliation, banking_payer_name, banking_reference_number, parse_banking_xlsx,
     deduplicate_banking_transactions, save_banking_payment_history,
+    repair_banking_payment_history_identities,
     bill_audit_matches, bill_audit_upload_rows, bill_audit_workbook,
     billing_fee_from_rate_card, billing_rate_case_type,
     parse_manual_bill_content, manual_bill_mis_workbook,
@@ -224,6 +228,44 @@ class SvaiSmokeTests(unittest.TestCase):
         self.assertEqual(export.status_code, 200)
         self.assertEqual(export.mimetype, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+    def test_payment_tracking_shows_net_and_receipt_evidence(self):
+        self.login()
+        with app.app_context():
+            statement = BankingStatement(filename="receipt-test.xlsx", source_format="Excel")
+            db.session.add(statement)
+            db.session.flush()
+            bill = ManualBillRecord(company_name="HDFC Bank", billing_period="2026-08",
+                invoice_number="SA/AUG/26/356", taxable_value=12300, gst_amount=2214,
+                gross_amount=14514, source_filename="test.xlsx")
+            db.session.add(bill)
+            credit = BankingTransaction(statement_id=statement.id, transaction_date=date(2026, 9, 17),
+                amount=13284, payer_name="HDFC Bank", reference_number="TEST-CREDIT", narration="credit")
+            debit = BankingTransaction(statement_id=statement.id, transaction_date=date(2026, 9, 18),
+                amount=13284, payer_name="HDFC Bank", reference_number="TEST-DEBIT", narration="debit", entry_type="Debit")
+            db.session.add_all([credit, debit])
+            db.session.commit()
+            bill_id, credit_id, debit_id = bill.id, credit.id, debit.id
+        page = self.client.get("/billing/payment-tracking?bank=HDFC+Bank")
+        top = page.data.split(b"Payment Match Review")[0]
+        self.assertIn(b"13,284.00", top)
+        self.assertIn(b"17-09-2026", top)
+        self.assertIn(b"TEST-CREDIT", top)
+        self.assertIn(b"confirmation pending", top)
+        self.assertNotIn(b"TEST-DEBIT", page.data)
+        self.client.post(f"/billing/manual-mis/{bill_id}/match-receipt", data={"transaction_id": debit_id, "_csrf_token": self.csrf()})
+        with app.app_context():
+            self.assertEqual(db.session.get(ManualBillRecord, bill_id).payment_status, "Pending")
+        self.client.post(f"/billing/manual-mis/{bill_id}/match-receipt", data={"transaction_id": credit_id, "_csrf_token": self.csrf()})
+        page = self.client.get("/billing/payment-tracking?bank=HDFC+Bank")
+        top = page.data.split(b"Payment Match Review")[0]
+        self.assertIn(b"Confirmed receipt", top)
+        self.assertIn(b"TEST-CREDIT", top)
+        self.assertNotIn(b"Match &amp; Mark Received</button>", page.data)
+        with app.app_context():
+            bill = db.session.get(ManualBillRecord, bill_id)
+            self.assertEqual(bill.received_amount, 13284)
+            self.assertEqual(bill.settled_amount, 14514)
+
     def test_banking_page_groups_ledgers_by_month(self):
         self.login()
         with app.app_context():
@@ -250,6 +292,33 @@ class SvaiSmokeTests(unittest.TestCase):
         selected = self.client.get("/banking?month=2026-08")
         self.assertIn(b"August 2026", selected.data)
         self.assertNotIn(b"July 2026", selected.data)
+
+    def test_debit_audit_filters_person_and_shows_month_and_date_data(self):
+        self.login()
+        with app.app_context():
+            statement = BankingStatement(filename="debit-audit.xlsx", source_format="Excel")
+            db.session.add(statement); db.session.flush()
+            debits = [
+                BankingTransaction(statement_id=statement.id, transaction_date=date(2026, 8, 8), amount=1200, payer_name="Praveen", reference_number="PR-8", narration="Paid to Praveen", entry_type="Debit"),
+                BankingTransaction(statement_id=statement.id, transaction_date=date(2026, 9, 9), amount=800, payer_name="Praveen/Salary September", reference_number="PR-9", narration="Paid to Praveen", entry_type="Debit"),
+                BankingTransaction(statement_id=statement.id, transaction_date=date(2026, 9, 10), amount=500, payer_name="Safiya", reference_number="SF-9", narration="Paid to Safiya", entry_type="Debit"),
+            ]
+            db.session.add_all(debits); db.session.flush()
+            from server import save_banking_debit_history
+            self.assertEqual(save_banking_debit_history(debits, statement.filename), 3)
+            self.assertEqual(save_banking_debit_history(debits, "overlap.xlsx"), 0)
+            db.session.commit()
+        page = self.client.get("/banking/debit-audit?recipient=Praveen")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"Debit Audit", page.data)
+        self.assertIn(b"PR-8", page.data)
+        self.assertIn(b"PR-9", page.data)
+        self.assertIn(b"2026-08", page.data)
+        self.assertIn(b"2026-09", page.data)
+        self.assertNotIn(b"SF-9", page.data)
+        september = self.client.get("/banking/debit-audit?recipient=Praveen&month=2026-09")
+        self.assertIn(b"PR-9", september.data)
+        self.assertNotIn(b"PR-8", september.data)
 
     def test_bill_audit_shows_all_selected_bank_credits_once_across_statements(self):
         self.login()
@@ -314,6 +383,27 @@ class SvaiSmokeTests(unittest.TestCase):
             self.assertEqual(BankingPaymentHistory.query.filter_by(payer_name="Ledger Test Bank").count(), 1)
         page = self.client.get("/banking/bill-audit?history_payer=Ledger+Test+Bank")
         self.assertIn(b"UTR-5000", page.data)
+
+    def test_payment_history_repairs_legacy_identity_without_duplicate_payment(self):
+        with app.app_context():
+            legacy = BankingPaymentHistory(
+                transaction_date=date(2026, 9, 2), payer_name="Identity Repair Bank",
+                amount=2500, reference_number="UTR-2500", narration="NEFT UTR-2500",
+                source_statement_filename="old.xlsx",
+                identity_key="2026-09-02|IDENTITY REPAIR BANK|2500.00|REF:UTR2500",
+            )
+            current = BankingPaymentHistory(
+                transaction_date=date(2026, 9, 2), payer_name="Identity Repair Bank",
+                amount=2500, reference_number="UTR-2500", narration="NEFT UTR-2500",
+                source_statement_filename="new.xlsx",
+                identity_key="2026-09-02|IDENTITY REPAIR BANK|2500.00|Credit:REF:UTR2500",
+            )
+            db.session.add_all([legacy, current])
+            db.session.commit()
+            self.assertEqual(repair_banking_payment_history_identities(), 1)
+            rows = BankingPaymentHistory.query.filter_by(payer_name="Identity Repair Bank").all()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].identity_key, "2026-09-02|IDENTITY REPAIR BANK|2500.00|Credit:REF:UTR2500")
 
     def test_banking_reconciliation_requires_same_year_and_month(self):
         from types import SimpleNamespace
@@ -1957,6 +2047,24 @@ BANK BRANCH NAME BHOPAL"""
         )
         self.assertEqual(extracted["customer_name"], "RAHUL PANTHI")
         self.assertEqual(extracted["contact_number"], "8319804954")
+        self.assertEqual(extracted["application_number"], "APPL01898651")
+
+    def test_sib_table_application_and_lifc_applicant_are_preserved(self):
+        sib = regex_email_extract(
+            "SIB technical valuation initiation",
+            "Name of the Borrower\nASSISI PROVINCE TRUST\n"
+            "Proposal No/Party Id/Client Id\nSIBP000123456",
+            "technical@sib.co.in",
+        )
+        self.assertEqual(sib["application_number"], "SIBP000123456")
+        self.assertEqual(sib["customer_name"], "ASSISI PROVINCE TRUST")
+        lifc = regex_email_extract(
+            "LIFC - TECHNICAL Case Assignment | LAPAST100034305 | Order No - 65879 | ASHTA (MP) Branch",
+            "Application Number: LAPAST100034305\nApplicant Name: Niraj Kumar Sondhiya",
+            "notifications@lifl.in",
+        )
+        self.assertEqual(lifc["application_number"], "LAPAST100034305")
+        self.assertEqual(lifc["customer_name"], "Niraj Kumar Sondhiya")
 
     def test_public_mail_sender_keeps_strong_new_assignment_only(self):
         self.assertTrue(deterministic_email_candidate(
@@ -2223,6 +2331,52 @@ BANK BRANCH NAME BHOPAL"""
                 case, {}, [], "Repeated fetch", None, "<followup@example.com>"
             ))
 
+    def test_name_only_status_or_document_mail_merges_only_one_existing_case(self):
+        with app.app_context():
+            case = ValuationCase(
+                application_number="DCB-EXISTING-101", customer_name="Rahul Panthi",
+                bank_name="DCB Bank", case_type="Fresh",
+            )
+            db.session.add(case)
+            db.session.commit()
+            details = {"customer_name": "RAHUL PANTHI", "bank_name": "DCB Bank"}
+            self.assertTrue(is_status_or_document_followup(
+                "Status update for Rahul Panthi", "Please find attached documents."
+            ))
+            self.assertFalse(is_status_or_document_followup(
+                "Fresh valuation assignment", "New valuation case for Rahul Panthi"
+            ))
+            self.assertEqual(existing_case_for_customer_followup(details).id, case.id)
+            count_before = ValuationCase.query.count()
+            self.assertTrue(apply_followup_to_existing_case(
+                case, details, [], "Status update for Rahul Panthi", None,
+                "<name-only-status@example.com>",
+                action="Same customer status/document mail merged into existing MIS case; no new row created",
+            ))
+            self.assertEqual(ValuationCase.query.count(), count_before)
+            duplicate = ValuationCase(
+                application_number="DCB-EXISTING-102", customer_name="Rahul Panthi",
+                bank_name="Other Bank", case_type="Fresh",
+            )
+            db.session.add(duplicate)
+            db.session.commit()
+            self.assertIsNone(existing_case_for_customer_followup({"customer_name": "Rahul Panthi"}))
+
+    def test_dcb_name_only_revised_or_correction_mail_is_a_safe_followup(self):
+        details = {"customer_name": "RAHUL PANTHI", "bank_name": "DCB Bank"}
+        self.assertTrue(is_name_only_existing_case_followup(
+            details, "DCB: Revised valuation report - Rahul Panthi",
+            "Please share revised report for customer Rahul Panthi.",
+        ))
+        self.assertTrue(is_name_only_existing_case_followup(
+            {**details, "correction_request_mail": True},
+            "Correction required for Rahul Panthi", "Please correct customer details.",
+        ))
+        self.assertFalse(is_name_only_existing_case_followup(
+            details, "Fresh valuation assignment - Rahul Panthi",
+            "New valuation case has been assigned.",
+        ))
+
     def test_same_application_number_merges_even_without_report_request_words(self):
         subject = "Please check details"
         body = "LAPSHR100033890 Jamna Prasad"
@@ -2236,6 +2390,32 @@ BANK BRANCH NAME BHOPAL"""
             db.session.commit()
             target = existing_case_for_application("LAPSHR100033890", subject=subject)
             self.assertEqual(target.id, existing.id)
+
+    def test_archived_cancelled_application_still_blocks_a_new_mis_case(self):
+        with app.app_context():
+            cancelled = ValuationCase(
+                application_number="CPTY-CANCEL-998877", customer_name="Monika Enterprises",
+                case_type="Fresh", archived=True, status="Cancelled",
+            )
+            db.session.add(cancelled)
+            db.session.commit()
+            target = existing_case_for_application("CPTY-CANCEL-998877")
+            self.assertEqual(target.id, cancelled.id)
+
+    def test_mis_application_search_uses_all_dates_for_review_comparison(self):
+        self.login()
+        with app.app_context():
+            older = ValuationCase(
+                application_number="SEARCH-ALL-001", customer_name="Older Case",
+                case_type="Fresh", status="New - Email",
+                email_received_at=datetime(2025, 1, 10, 10, 0),
+            )
+            db.session.add(older)
+            db.session.commit()
+        response = self.client.get("/mis?q=SEARCH-ALL-001")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"SEARCH-ALL-001", response.data)
+        self.assertIn(b"Older Case", response.data)
 
     def test_repeat_fetch_repairs_legacy_missing_headers_and_action_name(self):
         with app.app_context():
@@ -2328,6 +2508,19 @@ BANK BRANCH NAME BHOPAL"""
             self.assertTrue(correction_only.archived)
             self.assertEqual(correction_only.status, "Non-billing follow-up email")
 
+    def test_empty_email_shell_is_archived_not_left_in_mis(self):
+        with app.app_context():
+            empty = ValuationCase(
+                bank_name="Ummeed Housing Finance", case_type="LAP",
+                status="Email Parsed - Review", source_email="valuer@example.com",
+                email_subject="Technical Active Vendor - NDC",
+            )
+            db.session.add(empty)
+            db.session.commit()
+            self.assertGreaterEqual(clean_non_billing_followups(), 1)
+            self.assertTrue(empty.archived)
+            self.assertEqual(empty.status, "Ignored - no case identity in email")
+
     def test_incomplete_assignment_stays_in_review_queue_not_billing_mis(self):
         with app.app_context():
             ready = ValuationCase(
@@ -2354,6 +2547,25 @@ BANK BRANCH NAME BHOPAL"""
             self.assertFalse(incomplete.archived)
 
     def test_real_bank_subject_patterns_and_signature_are_parsed_safely(self):
+        hdfc = regex_email_extract(
+            "HDFC - Valuation Report1 Initiation request sent for Ms Monika "
+            "Enterprises(CPTY00155284) for Mortgage Process",
+            "Name of the Borrower\nMs Monika Enterprises\nProposal No/Party Id/Client Id\n"
+            "CPTY00155284\nProperty Id\nMT26CPTY00155284-0003",
+            "initiations@hdfc.com",
+        )
+        self.assertTrue(hdfc["is_valuation"])
+        self.assertEqual(hdfc["application_number"], "CPTY00155284")
+        self.assertEqual(hdfc["customer_name"], "Monika Enterprises")
+
+        sib = regex_email_extract(
+            "Construction progress certificate in the case of : ASSISI PROVINCE TRUST, "
+            "GANJ BASODA BARETH ROAD, BASODA VIDISHA",
+            "",
+            "credit@sib.co.in",
+        )
+        self.assertEqual(sib["customer_name"], "ASSISI PROVINCE TRUST")
+
         bajaj = regex_email_extract(
             "Re: Technical INITIATION // H425HLD1885354 // AMAN AGRAWAL // "
             "BHOPAL // RESALE",
@@ -2423,6 +2635,25 @@ BANK BRANCH NAME BHOPAL"""
             forwarded_structured_assignment["application_number"],
             "AYE-000003928097-LOS",
         )
+
+    def test_subject_repair_fills_only_explicit_hdfc_and_sib_names(self):
+        with app.app_context():
+            hdfc = ValuationCase(
+                application_number="CPTY00155284", bank_name="HDFC Housing Finance",
+                case_type="Fresh", status="Email Parsed - Review",
+                email_subject=("HDFC - Valuation Report1 Initiation request sent for Ms "
+                               "Monika Enterprises(CPTY00155284) for Mortgage Process"),
+            )
+            sib = ValuationCase(
+                bank_name="SIB", status="Email Parsed - Review",
+                email_subject=("Construction progress certificate in the case of : "
+                               "ASSISI PROVINCE TRUST, GANJ BASODA"),
+            )
+            db.session.add_all([hdfc, sib])
+            db.session.commit()
+            self.assertEqual(repair_missing_customer_names_from_subjects(), 2)
+            self.assertEqual(hdfc.customer_name, "Monika Enterprises")
+            self.assertEqual(sib.customer_name, "ASSISI PROVINCE TRUST")
 
     def test_refetch_recovers_a_previously_rejected_assignment(self):
         with app.app_context():

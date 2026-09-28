@@ -317,7 +317,10 @@ def _valid_application_number(value):
 def _clean_application_number(value):
     value = _space(value).upper().strip("()[]/ -")
     value = re.sub(
-        r"^(?:LAN|WIN|PROPOSAL|APP(?:LICATION)?(?:\s+ID)?|LEAD(?:\s+ID)?|"
+        # ``APP`` is a label only when it is a whole word.  Without the word
+        # boundary, a real DCB identifier such as ``APPL01887040`` was
+        # incorrectly shortened to ``L01887040``.
+        r"^(?:LAN|WIN|PROPOSAL|APP(?:LICATION)?\b(?:\s+ID)?|LEAD(?:\s+ID)?|"
         r"LOAN|CASE)\s*(?:NO|NUMBER|ID|#)?\s*[:=\-]*\s*",
         "",
         value,
@@ -622,6 +625,30 @@ def _subject_fields(subject):
     if explicit_app:
         result.setdefault("application_number", explicit_app)
 
+    # HDFC initiation subjects commonly carry both the borrower and proposal
+    # number together, for example: "... request sent for Ms Monika
+    # Enterprises (CPTY00155284) ...".  This is a case identity, not a bank
+    # employee/signature, so it is safe to use before reading the body table.
+    hdfc_initiation = re.search(
+        r"(?i)\b(?:valuation\s+)?report\d*\s+initiation\s+request\s+"
+        r"sent\s+for\s+(?:mr|mrs|ms|smt|shri)?\.?\s*"
+        r"(?P<name>[A-Za-z][A-Za-z .&'-]{1,90}?)\s*"
+        r"\(\s*(?P<app>[A-Z0-9][A-Z0-9/-]{4,45})\s*\)",
+        cleaned,
+    )
+    if hdfc_initiation:
+        result.setdefault("customer_name", _clean_person_name(hdfc_initiation.group("name")))
+        result.setdefault("application_number", _clean_application_number(hdfc_initiation.group("app")))
+
+    sib_progress = re.search(
+        r"(?i)\b(?:construction\s+progress\s+certificate|fresh\s+visit)"
+        r".*?\bcase\s+of\s*:\s*(?:mr|mrs|ms|smt|shri)?\.?\s*"
+        r"(?P<name>[A-Za-z][A-Za-z .&'-]{2,90}?)(?=\s*(?:,|\b(?:location|at)\s*:|$))",
+        cleaned,
+    )
+    if sib_progress:
+        result.setdefault("customer_name", _clean_person_name(sib_progress.group("name")))
+
     explicit_name = _first_match([
         r"(?i)technical\s+report\s+of\s+the\s+cases?\s+of\s+"
         r"([A-Za-z][A-Za-z .&'-]{2,70}?)\s*\([A-Z0-9][A-Z0-9/\-]{4,45}\)",
@@ -794,6 +821,13 @@ def regex_email_extract(subject, body, sender):
         r"(?im)(?:(?:application|app|case|proposal|loan|deal)\b\s*"
         r"(?:no|number|id|#)|lead\s*(?:id)?\s*(?:no|number|#)?)"
         r"\s*[:=\-]?\s*([A-Z0-9][A-Z0-9/\-]{4,45})",
+        # SIB/HDFC table headings can be exported as
+        # "Proposal No/Party Id/Client Id" followed by the value on the next
+        # line.  Treat those headings as one label instead of reading a label
+        # fragment as the identifier.
+        r"(?im)(?:proposal\s+(?:no|number)|party\s+id|client\s+id)"
+        r"(?:\s*/\s*(?:party\s+id|client\s+id))*\s*[:=\-]?\s*\n?\s*"
+        r"([A-Z0-9][A-Z0-9/\-]{4,45})",
         r"(?im)\b((?:SBFCLAP|LAP|HLSA|BLSA|HVDS|HAHA|HFC|DXJNP|APPL)"
         r"[A-Z0-9/\-]{4,35})\b",
         r"(?im)\b((?=[A-Z0-9/\-]{10,45}\b)"
@@ -809,6 +843,11 @@ def regex_email_extract(subject, body, sender):
         r"vendor\s+dashboard)\b))",
         r"(?im)technical\s+(?:report|request|initiation)\s+(?:of|for)?\s*[:=\-]\s*"
         r"(?:mr|mrs|ms|smt|shri)?\.?\s*([A-Za-z][A-Za-z .'-]{2,70})$",
+        r"(?ims)^\s*(?:name\s+of\s+(?:the\s+)?borrower|borrower(?:'s)?\s+name|"
+        r"name\s+of\s+(?:the\s+)?applicant|applicant(?:'s)?\s+name)\s*"
+        r"(?:[:=\-]\s*)?\n+\s*(?:mr|mrs|ms|smt|shri)?\.?\s*"
+        r"([A-Za-z][A-Za-z .&'-]{1,80}?)(?=\s*\n+(?:proposal|party|client|"
+        r"application|property|contact)\b)",
     ], text, _clean_person_name)
     branch_name = _first_match([
         r"(?im)^\s*branch\s*(?:name)?\s*(?:[:=\-]\s*|\s+)"
@@ -857,6 +896,18 @@ def regex_email_extract(subject, body, sender):
         ):
             property_address = candidate_address
         contact_number = contact_number or request_details.group("contact")
+
+    # HDFC/SIB table exports may flatten every cell, while copy/paste from the
+    # same table preserves line breaks.  Use the label boundaries in either
+    # representation and stop at the next column heading.
+    borrower_table = re.search(
+        r"(?is)\bname\s+of\s+(?:the\s+)?borrower\b\s*[:=\-]?\s*"
+        r"(?P<name>[A-Za-z][A-Za-z .&'-]{1,100}?)(?=\s+(?:proposal\s+"
+        r"(?:no|number)|party\s+id|client\s+id|property\s+id|description\s+of)\b)",
+        _space(safe_body),
+    )
+    if borrower_table and not customer_name:
+        customer_name = _clean_person_name(borrower_table.group("name"))
 
     # YES Bank's YESReap assignments use the same labels, but their HTML can
     # insert cells/newlines between every word. Parse each field boundary on

@@ -132,9 +132,13 @@ body.app-shell{--text:#101827;--line:#e8ecf2;--blue:#0755c9;--green:#15975a;--sh
 /* Gold property emblem and compact reference branding. */
 .brand-topbar .brand-lockup{display:flex;align-items:center;gap:11px;color:#fff;text-decoration:none;flex-shrink:0}
 .valuer-emblem{width:45px;height:55px;flex:none;filter:drop-shadow(0 2px 3px #0003)}
+.brand-topbar .brand-logo{width:56px;height:56px;display:block;object-fit:contain;border-radius:50%;box-shadow:0 4px 14px rgba(0,0,0,.3)}
 .brand-copy{display:flex;flex-direction:column;gap:3px}
 .brand-topbar .brand{font-size:23px;font-weight:700;letter-spacing:-.035em;line-height:1.1}
 .brand-topbar .subtitle{font-size:11px;line-height:1.4;margin:0;opacity:1;color:#f0f3f9}
 .brand-topbar .subtitle span{font-weight:500}
-@media(max-width:600px){.brand-topbar .brand-lockup{gap:8px}.valuer-emblem{width:36px;height:46px}.brand-topbar .brand{font-size:19px}.brand-topbar .subtitle{font-size:10px}.brand-topbar-actions{gap:10px}}
+@media(max-width:600px){.brand-topbar .brand-lockup{gap:8px}.brand-topbar .brand-logo{width:46px;height:46px}.brand-topbar .brand{font-size:19px}.brand-topbar .subtitle{font-size:10px}.brand-topbar-actions{gap:10px}}
+
+/* User-provided Saksham Valuer logo for the sign-in experience. */
+.login-logo{display:block;width:132px;height:132px;object-fit:contain;margin:0 auto 12px;border-radius:50%;box-shadow:0 10px 28px rgba(9,18,32,.22)}
 .bank-bill-register{width:100%;border-collapse:collapse;font-size:13px}.bank-bill-register td,.bank-bill-register th{padding:10px 12px;white-space:nowrap}.bank-bill-register td:nth-child(4),.bank-bill-register td:nth-child(5),.bank-bill-register td:nth-child(6){text-align:right;font-variant-numeric:tabular-nums}.bill-edit-dialog{border:0;border-radius:14px;padding:24px;width:min(720px,90vw);max-height:85vh;overflow:auto;box-shadow:0 18px 60px #0004}.bill-edit-dialog::backdrop{background:#10233e88}

@@ -7,7 +7,7 @@
       <h1>Banking · Incoming Payment Analysis</h1>
       <p>PDF ya Excel statement upload karein. Sirf credit payments bank/company ke hisab se ek saath dikhengi.</p>
     </div>
-    <a class="button green" href="{{ url_for('bill_audit_page') }}">Open Bill Audit</a>
+    <div class="banking-actions" style="gap:10px;flex-wrap:wrap"><a class="button green" href="{{ url_for('bill_audit_page') }}">Open Bill Audit</a><a class="button secondary" href="{{ url_for('debit_audit_page') }}">Open Debit Audit</a></div>
   </div>
   <form method="post" enctype="multipart/form-data" class="banking-upload">
     <label class="grow">Bank Statement (PDF / Excel)

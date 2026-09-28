@@ -9,14 +9,9 @@
 <body class="{% if session.get('user_id') %}app-shell{% endif %}">
 {% if session.get('user_id') %}
 <header class="brand-topbar">
-  <a class="brand-lockup" href="{{ url_for('dashboard') }}" aria-label="PRO VALUER home">
-    <svg class="valuer-emblem" viewBox="0 0 56 68" aria-hidden="true" focusable="false">
-      <defs><linearGradient id="valuer-gold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ffe29a"/><stop offset=".48" stop-color="#efb94d"/><stop offset="1" stop-color="#b77f25"/></linearGradient></defs>
-      <path d="M28 3 52 20v28L28 65 4 48V20Z" fill="#17283f" stroke="url(#valuer-gold)" stroke-width="2.4"/>
-      <path d="M9 23 28 10l19 13" fill="none" stroke="#ffdb81" stroke-width="1" opacity=".45"/>
-      <path d="M12 31 19 27v25l-7-5Zm11-8 8-4v39l-8-4Zm12 3 8 4v18l-8 7Z" fill="url(#valuer-gold)"/>
-    </svg>
-    <span class="brand-copy"><span class="brand">PRO VALUER</span><span class="subtitle">Powered by<br><span>Saksham Associate</span></span></span>
+  <a class="brand-lockup" href="{{ url_for('dashboard') }}" aria-label="Saksham Valuer home">
+    <img class="brand-logo" src="{{ url_for('static', filename='branding/saksham-valuer-logo.png') }}" alt="Saksham Valuer">
+    <span class="brand-copy"><span class="brand">SAKSHAM VALUER</span><span class="subtitle">Professional Valuation Services</span></span>
   </a>
   <div class="brand-topbar-actions"><a href="{{ url_for('settings_page') }}">Settings</a><a href="{{ url_for('logout') }}">Sign out</a></div>
 </header>
@@ -28,7 +23,7 @@
     <a class="{{ 'active' if request.endpoint == 'make_report' else '' }}" href="{{ url_for('make_report') }}"><span class="nav-icon">▤</span><span>Valuation</span></a>
     <a class="{{ 'active' if request.endpoint == 'reports_page' else '' }}" href="{{ url_for('reports_page') }}"><span class="nav-icon">▧</span><span>Reports</span></a>
     <a class="{{ 'active' if request.endpoint in ['billing_page', 'billing_home'] else '' }}" href="{{ url_for('billing_page') }}"><span class="nav-icon">₹</span><span>Billing</span></a>
-    <a class="{{ 'active' if request.endpoint == 'banking_page' else '' }}" href="{{ url_for('banking_page') }}"><span class="nav-icon">▰</span><span>Banking</span></a>
+    <a class="{{ 'active' if request.endpoint in ('banking_page', 'debit_audit_page') else '' }}" href="{{ url_for('banking_page') }}"><span class="nav-icon">▰</span><span>Banking</span></a>
     <a class="{{ 'active' if request.endpoint == 'site_engineers' else '' }}" href="{{ url_for('site_engineers') }}"><span class="nav-icon">♙</span><span>Engineers</span></a>
     <a class="{{ 'active' if request.endpoint == 'billing_setup_page' else '' }}" href="{{ url_for('billing_setup_page') }}"><span class="nav-icon">♙</span><span>Rate Card</span></a>
     <a class="{{ 'active' if request.endpoint == 'templates_page' else '' }}" href="{{ url_for('templates_page') }}"><span class="nav-icon">▦</span><span>Documents</span></a>
@@ -39,7 +34,7 @@
 <header class="workspace-topbar">
   <div class="page-title-lockup"><span class="page-title-icon">⌘</span><div><strong>{% block page_heading %}Dashboard{% endblock %}</strong><small>{% block page_subheading %}Welcome back! Here's what's happening with your valuation operations.{% endblock %}</small></div></div>
   <div class="topbar-tools">
-    <form class="global-search" action="{{ url_for('dashboard') }}" method="get"><span>⌕</span><input name="q" placeholder="Search cases, customers, banks"></form>
+    <form class="global-search" action="{{ url_for('mis_page') }}" method="get"><span>⌕</span><input name="q" placeholder="Search application, customer, bank"></form>
     <a class="notification-button" href="{{ url_for('mis_page', review='1') }}" aria-label="Cases needing details">♢</a>
     <div class="profile-chip"><span>{{ (session.get('name') or 'U')[0]|upper }}</span><div><b>{{ session.get('name') or 'User' }}</b><small>{{ (session.get('role') or 'Valuation Team')|title }}</small></div></div>
   </div>
